@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+uploads/
+*.egg-info/
+.pytest_cache/
+postgres_data/
+redis_data/
