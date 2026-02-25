@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package audio;
+
+service AudioService {
+  // Bidirectional streaming: receives audio chunks, saves to disk, echoes back
+  rpc StreamAudio(stream AudioChunk) returns (stream AudioChunk);
+}
+
+message AudioChunk {
+  bytes data = 1;
+  string session_id = 2;
+  int64 timestamp_ms = 3;
+}
