@@ -74,7 +74,7 @@ class ConversationalAgent:
         self.response_queue = response_queue
         
         # 1. OpenAI Client (from main_gpt.py)
-        self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
+        self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
         
         self.context = """You are a helpful AI assistant. Keep answers concise and natural for speech.
         Avoid using markdown, symbols, or formatting that cannot be read aloud easily."""
