@@ -10,8 +10,8 @@ import logging
 from concurrent import futures
 
 import grpc
-import audio_pb2
-import audio_pb2_grpc
+from proto import audio_pb2
+from proto import audio_pb2_grpc
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s"
@@ -75,3 +75,4 @@ def serve():
 
 if __name__ == "__main__":
     serve()
+

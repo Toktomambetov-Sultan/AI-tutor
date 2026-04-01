@@ -64,9 +64,9 @@ services:
     depends_on:
       - backend
 
-  audio_service:
+  conversational_agent:
     build:
-      context: ./audio_service
+      context: ./conversational_agent
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
