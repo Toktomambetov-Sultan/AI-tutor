@@ -10,6 +10,9 @@ from speech_recognition import Recognizer, AudioData
 from openai import OpenAI
 from pocket_tts import TTSModel
 import scipy.io.wavfile
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -71,7 +74,7 @@ class ConversationalAgent:
         self.response_queue = response_queue
         
         # 1. OpenAI Client (from main_gpt.py)
-        self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "HIDDEN_TOKEN"))
+        self.client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
         
         self.context = """You are a helpful AI assistant. Keep answers concise and natural for speech.
         Avoid using markdown, symbols, or formatting that cannot be read aloud easily."""
