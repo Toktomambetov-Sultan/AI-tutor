@@ -45,7 +45,7 @@ class AudioServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def StreamAudio(self, request_iterator, context):
-        """Bidirectional streaming: receives audio chunks, saves to disk, echoes back
+        """Bidirectional streaming: receives audio chunks and returns AI responses
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

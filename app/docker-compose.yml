@@ -39,7 +39,7 @@ services:
     env_file:
       - .env
     environment:
-      AUDIO_SERVICE_HOST: "audio_service:50051"
+      AUDIO_SERVICE_HOST: "conversational_agent:50051"
     volumes:
       - ./backend:/app
       - upload_data:/app/uploads
@@ -48,7 +48,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      audio_service:
+      conversational_agent:
         condition: service_started
 
   frontend:
@@ -73,6 +73,8 @@ services:
       - "50051:50051"
     volumes:
       - audio_data:/data/audio
+    env_file:
+      - .env
     environment:
       GRPC_PORT: "50051"
       AUDIO_SAVE_DIR: "/data/audio"

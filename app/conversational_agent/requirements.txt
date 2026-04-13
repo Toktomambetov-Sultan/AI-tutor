@@ -1,2 +1,13 @@
-grpcio==1.68.0
-grpcio-tools==1.68.0
+grpcio>=1.68.0
+grpcio-tools>=1.68.0
+openai>=2.24.0
+pocket-tts>=1.1.1
+scipy>=1.17.1
+sounddevice>=0.5.5
+soundfile>=0.13.1
+SpeechRecognition>=3.14.5
+torch>=2.10.0
+numpy
+python-dotenv>=1.0.1
+pydub>=0.25.1
+chromadb>=1.0.0

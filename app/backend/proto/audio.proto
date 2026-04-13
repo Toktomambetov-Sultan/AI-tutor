@@ -3,7 +3,7 @@ syntax = "proto3";
 package audio;
 
 service AudioService {
-  // Bidirectional streaming: receives audio chunks, saves to disk, echoes back
+  // Bidirectional streaming: receives audio chunks and returns AI responses
   rpc StreamAudio(stream AudioChunk) returns (stream AudioChunk);
 }
 
@@ -11,4 +11,7 @@ message AudioChunk {
   bytes data = 1;
   string session_id = 2;
   int64 timestamp_ms = 3;
+  // JSON-encoded lesson context sent in the FIRST message of the stream.
+  // Contains lesson title, course title, and material texts for RAG.
+  string lesson_context = 4;
 }

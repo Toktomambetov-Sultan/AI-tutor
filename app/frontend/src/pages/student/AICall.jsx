@@ -30,10 +30,8 @@ export default function AICall() {
     const timerRef = useRef(null);
     const canvasRef = useRef(null);
     const sourceNodeRef = useRef(null);
-    const audioElRef = useRef(null);
-    const mediaSourceRef = useRef(null);
-    const sourceBufferRef = useRef(null);
-    const pendingBuffersRef = useRef([]);
+    const audioQueueRef = useRef([]);
+    const isPlayingRef = useRef(false);
 
     // ─── Duration timer ───
     useEffect(() => {
@@ -97,22 +95,29 @@ export default function AICall() {
         draw();
     }, []);
 
-    // ─── Append echoed audio to MediaSource buffer ───
-    const appendBuffer = useCallback((data) => {
-        const sb = sourceBufferRef.current;
-        if (!sb) {
-            pendingBuffersRef.current.push(data);
-            return;
-        }
-        if (sb.updating) {
-            pendingBuffersRef.current.push(data);
-            return;
-        }
-        try {
-            sb.appendBuffer(data);
-        } catch (e) {
-            console.warn('appendBuffer error:', e);
-        }
+    // ─── Play queued WAV audio responses sequentially ───
+    const playNextInQueue = useCallback(() => {
+        if (isPlayingRef.current || audioQueueRef.current.length === 0) return;
+
+        isPlayingRef.current = true;
+        const wavData = audioQueueRef.current.shift();
+        const blob = new Blob([wavData], { type: 'audio/wav' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => {
+            URL.revokeObjectURL(url);
+            isPlayingRef.current = false;
+            playNextInQueue(); // play next if queued
+        };
+        audio.onerror = () => {
+            URL.revokeObjectURL(url);
+            isPlayingRef.current = false;
+            playNextInQueue();
+        };
+        audio.play().catch(() => {
+            isPlayingRef.current = false;
+            playNextInQueue();
+        });
     }, []);
 
     // ─── Start call ───
@@ -155,36 +160,6 @@ export default function AICall() {
                 setStatus(STATUS.ACTIVE);
                 drawWaveform();
 
-                // Set up MediaSource for streaming echo playback
-                const ms = new MediaSource();
-                mediaSourceRef.current = ms;
-                const echoAudio = new Audio();
-                audioElRef.current = echoAudio;
-                echoAudio.src = URL.createObjectURL(ms);
-                ms.addEventListener('sourceopen', () => {
-                    const mimeType = 'audio/webm;codecs=opus';
-                    if (!MediaSource.isTypeSupported(mimeType)) {
-                        console.warn('MediaSource does not support', mimeType);
-                        return;
-                    }
-                    const sb = ms.addSourceBuffer(mimeType);
-                    sourceBufferRef.current = sb;
-                    sb.addEventListener('updateend', () => {
-                        if (pendingBuffersRef.current.length > 0 && !sb.updating) {
-                            try {
-                                sb.appendBuffer(pendingBuffersRef.current.shift());
-                            } catch (e) { console.warn('appendBuffer error:', e); }
-                        }
-                    });
-                    // Flush any chunks that arrived before sourceopen
-                    if (pendingBuffersRef.current.length > 0 && !sb.updating) {
-                        try {
-                            sb.appendBuffer(pendingBuffersRef.current.shift());
-                        } catch (e) { console.warn('appendBuffer error:', e); }
-                    }
-                    echoAudio.play().catch(() => {});
-                });
-
                 // Start MediaRecorder to send audio chunks
                 const recorder = new MediaRecorder(stream, {
                     mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -203,8 +178,9 @@ export default function AICall() {
             };
 
             ws.onmessage = (event) => {
-                // Received echoed audio — append to MediaSource buffer
-                appendBuffer(event.data);
+                // Received complete WAV audio for one conversational turn
+                audioQueueRef.current.push(event.data);
+                playNextInQueue();
             };
 
             ws.onerror = () => {
@@ -225,7 +201,7 @@ export default function AICall() {
             }
             setStatus(STATUS.ERROR);
         }
-    }, [lessonId, token, drawWaveform, appendBuffer]);
+    }, [lessonId, token, drawWaveform, playNextInQueue]);
 
     // ─── End call ───
     const endCall = useCallback(() => {
@@ -251,18 +227,9 @@ export default function AICall() {
         if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
             audioContextRef.current.close();
         }
-        // Clean up MediaSource playback
-        if (audioElRef.current) {
-            audioElRef.current.pause();
-            audioElRef.current.src = '';
-            audioElRef.current = null;
-        }
-        if (mediaSourceRef.current && mediaSourceRef.current.readyState === 'open') {
-            try { mediaSourceRef.current.endOfStream(); } catch (e) {}
-        }
-        mediaSourceRef.current = null;
-        sourceBufferRef.current = null;
-        pendingBuffersRef.current = [];
+        // Clear audio playback queue
+        audioQueueRef.current = [];
+        isPlayingRef.current = false;
 
         setStatus(STATUS.IDLE);
         setAudioLevel(0);
@@ -347,7 +314,7 @@ export default function AICall() {
                 {/* Idle state description */}
                 {status === STATUS.IDLE && (
                     <p className="ai-call-desc">
-                        Start a voice session with your AI tutor. Your audio will be processed and echoed back in real-time.
+                        Start a voice session with your AI tutor. Speak naturally and the AI will respond to your questions in real-time.
                     </p>
                 )}
 
@@ -401,7 +368,7 @@ export default function AICall() {
                 {status === STATUS.ACTIVE && (
                     <div className="ai-call-info-badge">
                         <span className="pulse-dot" />
-                        Live · Echo Test Mode
+                        Live · AI Tutor Session
                     </div>
                 )}
             </div>

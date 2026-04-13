@@ -3,11 +3,12 @@ AI Agent router — WebSocket audio streaming with gRPC echo microservice.
 
 Flow:
   1.  Client opens WebSocket to /api/v1/ws/audio/{lesson_id}?token=<session_token>
-  2.  Client sends binary audio chunks (from MediaRecorder, webm/opus).
-  3.  Backend forwards each chunk to the audio_service via gRPC bidirectional streaming.
-  4.  audio_service saves to disk and echoes back the same chunk.
-  5.  Backend relays the echoed bytes to the client over WebSocket.
-  6.  Client plays back the received audio.
+  2.  Backend fetches lesson materials from the database and builds a lesson context.
+  3.  The first gRPC message carries the lesson context (JSON) for RAG setup.
+  4.  Client sends binary audio chunks (from MediaRecorder, webm/opus).
+  5.  Backend forwards each chunk to the audio_service via gRPC bidirectional streaming.
+  6.  audio_service uses RAG-augmented AI to respond with lesson-aware audio.
+  7.  Backend relays the AI audio back to the client over WebSocket.
 """
 
 import asyncio
@@ -26,12 +27,18 @@ import grpc.aio
 
 from app.database import async_session_factory
 from app.models.user import User, UserRole
+from app.models.lesson import Lesson
+from app.models.material import Material
+from app.models.class_ import Class
+from app.models.course import Course
 from app.redis import redis_client
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-AUDIO_SERVICE_HOST = os.environ.get("AUDIO_SERVICE_HOST", "audio_service:50051")
+AUDIO_SERVICE_HOST = os.environ.get("AUDIO_SERVICE_HOST", "10.129.0.158:50051")
+settings = get_settings()
 
 # ---------------------------------------------------------------------------
 # Lazy import of generated gRPC stubs — they only exist after Docker build
@@ -54,6 +61,103 @@ def _ensure_grpc_stubs():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _extract_pdf_text(file_path: str) -> str:
+    """Extract text from a PDF file on disk. Returns empty string on failure."""
+    full_path = os.path.join(settings.UPLOAD_DIR, file_path)
+    if not os.path.exists(full_path):
+        logger.warning("PDF file not found: %s", full_path)
+        return ""
+    try:
+        from pypdf import PdfReader
+
+        reader = PdfReader(full_path)
+        text_parts = []
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text_parts.append(page_text)
+        text = "\n".join(text_parts)
+        logger.info("Extracted %d chars from PDF %s", len(text), file_path)
+        return text
+    except Exception as e:
+        logger.error("Failed to extract PDF text from %s: %s", file_path, e)
+        return ""
+
+
+async def _build_lesson_context(lesson_id: uuid.UUID) -> str:
+    """Fetch lesson, its class/course hierarchy, and materials from the DB.
+    Returns a JSON string suitable for the RAG system."""
+    async with async_session_factory() as db:
+        # Fetch lesson
+        result = await db.execute(
+            select(Lesson).where(Lesson.id == lesson_id, Lesson.deleted_at.is_(None))
+        )
+        lesson = result.scalar_one_or_none()
+        if not lesson:
+            logger.warning("Lesson %s not found for RAG context", lesson_id)
+            return ""
+
+        # Fetch class and course for hierarchy titles
+        class_title = ""
+        course_title = ""
+        if lesson.class_id:
+            cls_result = await db.execute(
+                select(Class).where(Class.id == lesson.class_id)
+            )
+            cls = cls_result.scalar_one_or_none()
+            if cls:
+                class_title = cls.title
+                if cls.course_id:
+                    course_result = await db.execute(
+                        select(Course).where(Course.id == cls.course_id)
+                    )
+                    course = course_result.scalar_one_or_none()
+                    if course:
+                        course_title = course.title
+
+        # Fetch materials
+        mat_result = await db.execute(
+            select(Material).where(
+                Material.lesson_id == lesson_id,
+                Material.deleted_at.is_(None),
+            )
+        )
+        materials = mat_result.scalars().all()
+
+        material_list = []
+        for m in materials:
+            content = ""
+            if m.type.value == "text":
+                content = m.content or ""
+            elif m.type.value == "pdf" and m.file_path:
+                content = _extract_pdf_text(m.file_path)
+
+            if content.strip():
+                material_list.append(
+                    {
+                        "type": m.type.value,
+                        "content": content,
+                        "title": f"{m.type.value.upper()} material",
+                    }
+                )
+
+        context = {
+            "lesson_title": lesson.title,
+            "class_title": class_title,
+            "course_title": course_title,
+            "materials": material_list,
+        }
+
+        context_json = json.dumps(context)
+        logger.info(
+            "Built lesson context for %r: %d materials, %d chars",
+            lesson.title,
+            len(material_list),
+            len(context_json),
+        )
+        return context_json
 
 
 async def _authenticate_ws(token: str) -> Optional[User]:
@@ -102,6 +206,9 @@ async def audio_websocket(websocket: WebSocket, lesson_id: uuid.UUID):
         session_id,
     )
 
+    # --- fetch lesson materials for RAG ---
+    lesson_context = await _build_lesson_context(lesson_id)
+
     # --- open gRPC channel to audio_service ---
     _ensure_grpc_stubs()
     channel = grpc.aio.insecure_channel(AUDIO_SERVICE_HOST)
@@ -109,6 +216,16 @@ async def audio_websocket(websocket: WebSocket, lesson_id: uuid.UUID):
 
     # Queue that bridges the WS receive loop → gRPC request generator
     send_queue: asyncio.Queue = asyncio.Queue()
+
+    # Send lesson context as the FIRST gRPC message
+    await send_queue.put(
+        _audio_pb2.AudioChunk(
+            data=b"",
+            session_id=session_id,
+            timestamp_ms=int(time.time() * 1000),
+            lesson_context=lesson_context,
+        )
+    )
 
     async def _grpc_request_iter():
         """Yields AudioChunks until a sentinel (None) is enqueued."""
