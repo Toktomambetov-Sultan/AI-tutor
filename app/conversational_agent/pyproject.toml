@@ -15,3 +15,7 @@ dependencies = [
     "torch>=2.10.0",
     "chromadb>=1.0.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["__tests__"]
+pythonpath = ["."]

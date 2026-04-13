@@ -4,7 +4,9 @@ already cached on disk), encodes as WebM/Opus, sends through gRPC
 while keeping the stream open.  Verifies agent responds MID-STREAM.
 
 Usage (inside the container):
-    python test_grpc.py
+    python -m pytest __tests__/test_grpc.py -v
+    # or directly:
+    python __tests__/test_grpc.py
 """
 
 import asyncio

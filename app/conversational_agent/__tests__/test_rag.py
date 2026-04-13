@@ -6,7 +6,7 @@ WITHOUT requiring the full audio/gRPC/TTS stack.
 
 Run:
     pip install chromadb openai python-dotenv pytest
-    OPENAI_API_KEY=sk-... pytest test_rag.py -v
+    OPENAI_API_KEY=sk-... pytest __tests__/test_rag.py -v
 """
 
 import json
@@ -24,7 +24,7 @@ load_dotenv()
 # Unit tests for _chunk_text (no external dependencies)
 # ─────────────────────────────────────────────────────────────────────
 
-from rag import _chunk_text, LessonRAG
+from conversational_agent.core.rag import _chunk_text, LessonRAG
 
 
 class TestChunking:

@@ -59,7 +59,8 @@ COPY --from=builder /app/proto/ proto/
 
 # Application code (single layer — code changes don't bust the
 # large site-packages cache layer above)
-COPY agent.py server.py rag.py ./
+COPY core/ core/
+COPY prompts.py server.py rag.py ./
 
 RUN mkdir -p /data/audio
 
