@@ -14,6 +14,14 @@ import os
 import pytest
 from unittest.mock import MagicMock, patch
 
+# ─── Stub old openai if OpenAI class is missing ───
+try:
+    from openai import OpenAI  # noqa: F401
+except (ImportError, AttributeError):
+    import openai as _openai_mod
+
+    _openai_mod.OpenAI = MagicMock()
+
 # ─── Ensure env is loaded ───
 from dotenv import load_dotenv
 
@@ -24,7 +32,7 @@ load_dotenv()
 # Unit tests for _chunk_text (no external dependencies)
 # ─────────────────────────────────────────────────────────────────────
 
-from conversational_agent.core.rag import _chunk_text, LessonRAG
+from core.rag import _chunk_text, LessonRAG
 
 
 class TestChunking:

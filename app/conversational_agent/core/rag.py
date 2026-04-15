@@ -9,6 +9,8 @@ Responsibilities:
       question or the current point in the lesson.
 """
 
+from __future__ import annotations
+
 # ChromaDB needs sqlite3 >= 3.35.  On older systems we swap in pysqlite3.
 try:
     import pysqlite3
@@ -26,7 +28,7 @@ from typing import Optional
 import chromadb
 from openai import OpenAI
 
-from conversational_agent.core.prompts import RAG_CONTEXT_HEADER, TUTOR_BASE_PROMPT, TUTOR_RAG_FOOTER
+from core.prompts import RAG_CONTEXT_HEADER, TUTOR_BASE_PROMPT, TUTOR_RAG_FOOTER
 
 logger = logging.getLogger(__name__)
 

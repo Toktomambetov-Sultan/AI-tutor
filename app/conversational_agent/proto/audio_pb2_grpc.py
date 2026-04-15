@@ -3,9 +3,9 @@
 import grpc
 import warnings
 
-from proto import audio_pb2 as proto_dot_audio__pb2
+import audio_pb2 as audio__pb2
 
-GRPC_GENERATED_VERSION = '1.68.0'
+GRPC_GENERATED_VERSION = '1.80.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + f' but the generated code in proto/audio_pb2_grpc.py depends on'
+        + ' but the generated code in audio_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -36,8 +36,8 @@ class AudioServiceStub(object):
         """
         self.StreamAudio = channel.stream_stream(
                 '/audio.AudioService/StreamAudio',
-                request_serializer=proto_dot_audio__pb2.AudioChunk.SerializeToString,
-                response_deserializer=proto_dot_audio__pb2.AudioChunk.FromString,
+                request_serializer=audio__pb2.AudioChunk.SerializeToString,
+                response_deserializer=audio__pb2.AudioChunk.FromString,
                 _registered_method=True)
 
 
@@ -45,7 +45,7 @@ class AudioServiceServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def StreamAudio(self, request_iterator, context):
-        """Bidirectional streaming: receives audio chunks, saves to disk, echoes back
+        """Bidirectional streaming: receives audio chunks and returns AI responses
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -56,8 +56,8 @@ def add_AudioServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'StreamAudio': grpc.stream_stream_rpc_method_handler(
                     servicer.StreamAudio,
-                    request_deserializer=proto_dot_audio__pb2.AudioChunk.FromString,
-                    response_serializer=proto_dot_audio__pb2.AudioChunk.SerializeToString,
+                    request_deserializer=audio__pb2.AudioChunk.FromString,
+                    response_serializer=audio__pb2.AudioChunk.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -85,8 +85,8 @@ class AudioService(object):
             request_iterator,
             target,
             '/audio.AudioService/StreamAudio',
-            proto_dot_audio__pb2.AudioChunk.SerializeToString,
-            proto_dot_audio__pb2.AudioChunk.FromString,
+            audio__pb2.AudioChunk.SerializeToString,
+            audio__pb2.AudioChunk.FromString,
             options,
             channel_credentials,
             insecure,

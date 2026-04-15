@@ -1,17 +1,25 @@
 """
-Real-time audio processor with energy-based Voice Activity Detection (VAD).
+Real-time audio processor with Silero VAD and adaptive silence detection.
 
 Spawns a persistent ffmpeg process that decodes a continuous WebM/Opus
-stream into 16 kHz mono PCM.  A reader thread performs energy-based VAD
-on the decoded PCM and fires a callback when an utterance boundary
-(speech → silence) is detected.
+stream into 16 kHz mono PCM.  A reader thread runs Silero VAD on the
+decoded PCM and fires a callback when an utterance boundary (speech →
+silence) is detected.
+
+Improvements over the original energy-based approach:
+  - **Silero VAD** — neural model, far more accurate than RMS energy
+  - **Adaptive silence threshold** — tracks the speaker's cadence and
+    auto-adjusts how long a pause is needed to end an utterance
 """
+
+from __future__ import annotations
 
 import logging
 import subprocess
 import threading
 
 import numpy as np
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -19,44 +27,83 @@ logger = logging.getLogger(__name__)
 TARGET_SAMPLE_RATE = 16000
 BYTES_PER_SAMPLE = 2  # 16-bit PCM
 
+# ─── Silero VAD (loaded once per process) ────────────────────────────
+_silero_model = None
+_silero_utils = None
+_silero_lock = threading.Lock()
+
+
+def _ensure_silero_model():
+    """Lazy-load Silero VAD from torch.hub (cached after first call)."""
+    global _silero_model, _silero_utils
+    if _silero_model is not None:
+        return
+    with _silero_lock:
+        if _silero_model is not None:
+            return
+        logger.info("Loading Silero VAD model …")
+        model, utils = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            force_reload=False,
+            onnx=False,
+            trust_repo=True,
+        )
+        _silero_model = model
+        _silero_utils = utils
+        logger.info("Silero VAD model loaded.")
+
 
 class RealtimeAudioProcessor:
     """
     Spawns a persistent ffmpeg process that decodes a continuous WebM/Opus
-    stream into 16 kHz mono PCM in real-time.  A reader thread performs
-    energy-based VAD on the decoded PCM and fires a callback when an
+    stream into 16 kHz mono PCM in real-time.  A reader thread runs
+    **Silero VAD** on the decoded PCM and fires a callback when an
     utterance boundary (speech → silence) is detected.
+
+    Adaptive silence detection: the processor tracks the student's
+    speaking cadence and adjusts ``silence_sec`` between a floor and
+    ceiling so that fast speakers get shorter pauses and slower
+    speakers get more generous ones.
     """
 
     def __init__(
         self,
         on_utterance: "callable",
         sample_rate: int = TARGET_SAMPLE_RATE,
-        silence_sec: float = 1.2,
-        energy_threshold: float = 300,
-        min_speech_sec: float = 0.4,
+        silence_sec: float = 1.5,
+        min_silence_sec: float = 1.0,
+        max_silence_sec: float = 2.5,
+        vad_threshold: float = 0.45,
+        min_speech_sec: float = 0.5,
     ):
+        _ensure_silero_model()
+
         self.on_utterance = on_utterance
         self.sample_rate = sample_rate
-        self.silence_sec = silence_sec
-        self.energy_threshold = energy_threshold
+
+        # ── Adaptive silence parameters ──
+        self.silence_sec = silence_sec  # current (adaptive) pause duration
+        self._min_silence_sec = min_silence_sec
+        self._max_silence_sec = max_silence_sec
+        self._recent_speech_durations: list[float] = []  # last N utterances in secs
+        self._ADAPT_WINDOW = 5  # look at last 5 utterances
+
+        self.vad_threshold = vad_threshold
         self.min_speech_bytes = int(min_speech_sec * sample_rate * BYTES_PER_SAMPLE)
 
         self._alive = True
         self._pcm_buf = bytearray()
         self._is_speaking = False
-        self._silence_frames = 0  # count of consecutive silent frames (audio-time)
+        self._silence_frames = 0
 
-        # Persistent ffmpeg: reads WebM from stdin, writes raw PCM to stdout.
-        # -probesize / -analyzeduration keep startup fast.
-        # -flush_packets 1 forces PCM output to be flushed immediately.
+        # Persistent ffmpeg
         self._proc = subprocess.Popen(
             [
                 "ffmpeg",
                 "-hide_banner",
                 "-loglevel",
                 "warning",
-                # Low probe / analyse so first PCM comes fast
                 "-probesize",
                 "32",
                 "-analyzeduration",
@@ -85,7 +132,6 @@ class RealtimeAudioProcessor:
             bufsize=0,
         )
 
-        # Log ffmpeg stderr in background so we can see any errors or timing
         self._stderr_thread = threading.Thread(target=self._log_stderr, daemon=True)
         self._stderr_thread.start()
 
@@ -127,51 +173,101 @@ class RealtimeAudioProcessor:
         except Exception:
             pass
 
+    def _adapt_silence_threshold(self, utterance_bytes: int):
+        """Track utterance lengths and adapt the silence-to-end window.
+
+        Fast speakers → shorter required silence → quicker turn-taking.
+        Slow speakers → longer required silence → avoids cutting them off.
+        """
+        dur = utterance_bytes / (self.sample_rate * BYTES_PER_SAMPLE)
+        self._recent_speech_durations.append(dur)
+        if len(self._recent_speech_durations) > self._ADAPT_WINDOW:
+            self._recent_speech_durations.pop(0)
+
+        if len(self._recent_speech_durations) < 2:
+            return  # not enough data yet
+
+        avg_dur = sum(self._recent_speech_durations) / len(
+            self._recent_speech_durations
+        )
+
+        # Heuristic: shorter average speech → shorter silence needed
+        # Map avg speech [1s..8s] → silence [min..max]
+        ratio = max(0.0, min(1.0, (avg_dur - 1.0) / 7.0))
+        new_silence = self._min_silence_sec + ratio * (
+            self._max_silence_sec - self._min_silence_sec
+        )
+        if abs(new_silence - self.silence_sec) > 0.05:
+            logger.info(
+                "Adaptive silence: avg_speech=%.1fs → silence_sec %.2f→%.2f",
+                avg_dur,
+                self.silence_sec,
+                new_silence,
+            )
+            self.silence_sec = new_silence
+
+    def _run_silero_vad(self, pcm_chunk: bytes) -> float:
+        """Return Silero VAD speech probability for a 512-sample PCM chunk."""
+        arr = np.frombuffer(pcm_chunk, dtype=np.int16).astype(np.float32) / 32768.0
+        tensor = torch.from_numpy(arr)
+        with torch.no_grad():
+            prob = _silero_model(tensor, self.sample_rate).item()
+        return prob
+
     def _read_loop(self):
-        """Read decoded PCM from ffmpeg stdout and run energy-based VAD."""
-        CHUNK_SAMPLES = 1600  # 100 ms at 16 kHz
+        """Read decoded PCM from ffmpeg stdout and run Silero VAD."""
+        CHUNK_SAMPLES = 512  # 32 ms at 16 kHz  (Silero requires exactly 512 @ 16k)
         CHUNK_BYTES = CHUNK_SAMPLES * BYTES_PER_SAMPLE
-        CHUNK_DURATION_SEC = CHUNK_SAMPLES / self.sample_rate  # 0.1 s
-        SILENCE_FRAMES_NEEDED = int(self.silence_sec / CHUNK_DURATION_SEC)
+        CHUNK_DURATION_SEC = CHUNK_SAMPLES / self.sample_rate  # 0.032 s
         frames_read = 0
+        read_buf = bytearray()  # buffer for partial stdout reads
 
         logger.info(
-            "PCM reader loop started (silence_threshold=%d frames = %.1fs)",
-            SILENCE_FRAMES_NEEDED,
+            "PCM reader loop started (Silero VAD, threshold=%.2f, silence=%.1fs)",
+            self.vad_threshold,
             self.silence_sec,
         )
 
         while self._alive:
             try:
-                data = self._proc.stdout.read(CHUNK_BYTES)
-                if not data:
+                raw = self._proc.stdout.read(CHUNK_BYTES)
+                if not raw:
                     logger.info("ffmpeg stdout EOF after %d frames", frames_read)
                     break
 
+                read_buf.extend(raw)
+                # Process only complete 512-sample chunks
+                if len(read_buf) < CHUNK_BYTES:
+                    continue
+                data = bytes(read_buf[:CHUNK_BYTES])
+                del read_buf[:CHUNK_BYTES]
+
                 frames_read += 1
 
-                # Energy of this 100 ms frame
-                arr = np.frombuffer(data, dtype=np.int16).astype(np.float32)
-                energy = np.sqrt(np.mean(arr**2))
+                # ── Silero VAD ──
+                speech_prob = self._run_silero_vad(data)
 
-                # Log periodically for diagnostics
+                # Adaptive: recalculate silence frames based on current silence_sec
+                silence_frames_needed = int(self.silence_sec / CHUNK_DURATION_SEC)
+
                 if frames_read % 50 == 0:
                     logger.debug(
-                        "PCM frame #%d: energy=%.0f speaking=%s silence_frames=%d buf=%d",
+                        "frame #%d: prob=%.3f speaking=%s sil_frames=%d/%d buf=%d",
                         frames_read,
-                        energy,
+                        speech_prob,
                         self._is_speaking,
                         self._silence_frames,
+                        silence_frames_needed,
                         len(self._pcm_buf),
                     )
 
-                if energy > self.energy_threshold:
+                if speech_prob >= self.vad_threshold:
                     # ── speech detected ──
                     if not self._is_speaking:
                         logger.info(
-                            "VAD: speech START at frame %d (energy=%.0f)",
+                            "VAD: speech START at frame %d (prob=%.3f)",
                             frames_read,
-                            energy,
+                            speech_prob,
                         )
                     self._is_speaking = True
                     self._silence_frames = 0
@@ -183,13 +279,12 @@ class RealtimeAudioProcessor:
 
                     if self._silence_frames == 1:
                         logger.info(
-                            "VAD: speech->silence at frame %d (energy=%.0f)",
+                            "VAD: speech→silence at frame %d (prob=%.3f)",
                             frames_read,
-                            energy,
+                            speech_prob,
                         )
 
-                    if self._silence_frames >= SILENCE_FRAMES_NEEDED:
-                        # Utterance boundary reached (audio-time based)
+                    if self._silence_frames >= silence_frames_needed:
                         pcm = bytes(self._pcm_buf)
                         self._pcm_buf = bytearray()
                         self._is_speaking = False
@@ -201,6 +296,8 @@ class RealtimeAudioProcessor:
                                 len(pcm) / (self.sample_rate * BYTES_PER_SAMPLE),
                                 frames_read,
                             )
+                            # ── Adapt silence for next utterance ──
+                            self._adapt_silence_threshold(len(pcm))
                             self.on_utterance(pcm)
                         else:
                             logger.debug("VAD: utterance too short, discarding")
@@ -210,6 +307,12 @@ class RealtimeAudioProcessor:
                 if self._alive:
                     logger.warning("PCM reader error: %s", e)
                 break
+
+        # Reset Silero model state at end of session
+        try:
+            _silero_model.reset_states()
+        except Exception:
+            pass
 
         logger.info(
             "PCM reader loop exited (alive=%s, frames_read=%d)",

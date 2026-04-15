@@ -58,3 +58,14 @@ OPENING_GREETING_INSTRUCTION = (
 RAG_CONTEXT_HEADER = (
     "[Relevant lesson material for your reference — use this to inform your response]"
 )
+
+# ─── Interrupt / barge-in context ─────────────────────────────────────
+
+INTERRUPT_CONTEXT_TEMPLATE = (
+    "[SYSTEM: The student interrupted you while you were speaking. "
+    'You had said: "{spoken_text}" '
+    'Your full planned response was: "{full_text}" '
+    "The student wants to ask something or needs clarification. "
+    "Acknowledge that they interrupted, answer their question, "
+    "then offer to continue where you left off.]"
+)

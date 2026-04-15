@@ -24,15 +24,15 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0b\x61udio.proto\x12\x05\x61udio\"\\\n\nAudioChunk\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x12\n\nsession_id\x18\x02 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x03 \x01(\x03\x12\x16\n\x0elesson_context\x18\x04 \x01(\t2G\n\x0c\x41udioService\x12\x37\n\x0bStreamAudio\x12\x11.audio.AudioChunk\x1a\x11.audio.AudioChunk(\x01\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0b\x61udio.proto\x12\x05\x61udio\"\x94\x01\n\nAudioChunk\x12\x0c\n\x04\x64\x61ta\x18\x01 \x01(\x0c\x12\x12\n\nsession_id\x18\x02 \x01(\t\x12\x14\n\x0ctimestamp_ms\x18\x03 \x01(\x03\x12\x16\n\x0elesson_context\x18\x04 \x01(\t\x12\x0e\n\x06signal\x18\x05 \x01(\t\x12\x0f\n\x07\x61i_text\x18\x06 \x01(\t\x12\x15\n\rclient_signal\x18\x07 \x01(\t2G\n\x0c\x41udioService\x12\x37\n\x0bStreamAudio\x12\x11.audio.AudioChunk\x1a\x11.audio.AudioChunk(\x01\x30\x01\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'audio_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   DESCRIPTOR._loaded_options = None
-  _globals['_AUDIOCHUNK']._serialized_start=22
-  _globals['_AUDIOCHUNK']._serialized_end=114
-  _globals['_AUDIOSERVICE']._serialized_start=116
-  _globals['_AUDIOSERVICE']._serialized_end=187
+  _globals['_AUDIOCHUNK']._serialized_start=23
+  _globals['_AUDIOCHUNK']._serialized_end=171
+  _globals['_AUDIOSERVICE']._serialized_start=173
+  _globals['_AUDIOSERVICE']._serialized_end=244
 # @@protoc_insertion_point(module_scope)

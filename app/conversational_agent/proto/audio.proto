@@ -14,4 +14,17 @@ message AudioChunk {
   // JSON-encoded lesson context sent in the FIRST message of the stream.
   // Contains lesson title, course title, and material texts for RAG.
   string lesson_context = 4;
+
+  // ── Control signals (server → client) ──
+  // "ready"     — RAG + models loaded, client may start recording
+  // "interrupt_ack" — server acknowledged barge-in
+  string signal = 5;
+
+  // The text the AI is currently speaking (sent alongside audio so the
+  // client knows where the AI was interrupted).
+  string ai_text = 6;
+
+  // ── Control signals (client → server) ──
+  // "interrupt" — student started speaking, cancel current TTS playback
+  string client_signal = 7;
 }

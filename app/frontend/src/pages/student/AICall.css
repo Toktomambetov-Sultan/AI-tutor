@@ -157,6 +157,84 @@
     }
 }
 
+/* Calling state – phone-ring pulse */
+.ai-avatar-wrapper.calling .ai-avatar-ring {
+    border-color: rgba(16, 185, 129, 0.5);
+    animation: callingRing 1.2s ease-in-out infinite;
+}
+
+.ai-avatar-wrapper.calling .ai-avatar-ring.ring-2 {
+    border-color: rgba(16, 185, 129, 0.25);
+    animation: callingRing 1.2s ease-in-out infinite 0.2s;
+}
+
+.ai-avatar-wrapper.calling .ai-avatar {
+    animation: callingPulse 1.2s ease-in-out infinite;
+    box-shadow:
+        0 0 50px rgba(16, 185, 129, 0.35),
+        0 0 100px rgba(16, 185, 129, 0.15);
+}
+
+@keyframes callingRing {
+    0% {
+        transform: scale(1);
+        opacity: 0.6;
+    }
+
+    50% {
+        transform: scale(1.15);
+        opacity: 1;
+    }
+
+    100% {
+        transform: scale(1);
+        opacity: 0.6;
+    }
+}
+
+@keyframes callingPulse {
+
+    0%,
+    100% {
+        transform: scale(1);
+    }
+
+    50% {
+        transform: scale(1.04);
+    }
+}
+
+/* Speaking state – voice wave effect on avatar */
+.ai-avatar-wrapper.speaking .ai-avatar-ring {
+    border-color: rgba(139, 92, 246, 0.6);
+    animation: speakPulse 0.8s ease-in-out infinite;
+}
+
+.ai-avatar-wrapper.speaking .ai-avatar-ring.ring-2 {
+    border-color: rgba(139, 92, 246, 0.3);
+    animation: speakPulse 0.8s ease-in-out infinite 0.15s;
+}
+
+.ai-avatar-wrapper.speaking .ai-avatar {
+    box-shadow:
+        0 0 60px rgba(139, 92, 246, 0.5),
+        0 0 120px rgba(139, 92, 246, 0.2);
+}
+
+@keyframes speakPulse {
+
+    0%,
+    100% {
+        transform: scale(1);
+        opacity: 0.7;
+    }
+
+    50% {
+        transform: scale(1.08);
+        opacity: 1;
+    }
+}
+
 .ai-avatar {
     width: 100px;
     height: 100px;
@@ -192,6 +270,34 @@
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.05em;
     margin-bottom: 0.5rem;
+}
+
+/* AI speech subtitle */
+.ai-call-subtitle {
+    color: rgba(255, 255, 255, 0.75);
+    font-size: 0.9375rem;
+    line-height: 1.6;
+    max-width: 380px;
+    text-align: center;
+    margin: 0.5rem 0 0.75rem;
+    padding: 0.5rem 1rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    backdrop-filter: blur(8px);
+    animation: subtitleFadeIn 0.3s ease-out;
+}
+
+@keyframes subtitleFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 /* Waveform */

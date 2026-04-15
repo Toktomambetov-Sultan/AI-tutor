@@ -242,14 +242,34 @@ async def audio_websocket(websocket: WebSocket, lesson_id: uuid.UUID):
     async def _ws_to_grpc():
         try:
             while True:
-                data = await websocket.receive_bytes()
-                await send_queue.put(
-                    _audio_pb2.AudioChunk(
-                        data=data,
-                        session_id=session_id,
-                        timestamp_ms=int(time.time() * 1000),
+                raw = await websocket.receive()
+                # Support both binary audio frames and text control messages
+                if "bytes" in raw and raw["bytes"]:
+                    await send_queue.put(
+                        _audio_pb2.AudioChunk(
+                            data=raw["bytes"],
+                            session_id=session_id,
+                            timestamp_ms=int(time.time() * 1000),
+                        )
                     )
-                )
+                elif "text" in raw and raw["text"]:
+                    import json as _json
+
+                    try:
+                        msg = _json.loads(raw["text"])
+                        if msg.get("signal") == "interrupt":
+                            logger.info(
+                                "Client interrupt signal  session=%s", session_id
+                            )
+                            await send_queue.put(
+                                _audio_pb2.AudioChunk(
+                                    session_id=session_id,
+                                    timestamp_ms=int(time.time() * 1000),
+                                    client_signal="interrupt",
+                                )
+                            )
+                    except Exception:
+                        pass
         except WebSocketDisconnect:
             logger.info("Client disconnected  session=%s", session_id)
         except Exception as exc:
@@ -257,11 +277,21 @@ async def audio_websocket(websocket: WebSocket, lesson_id: uuid.UUID):
         finally:
             await send_queue.put(None)  # signal gRPC iterator to stop
 
-    # --- task: read echoed chunks from gRPC → push to client WS ---
+    # --- task: read responses from gRPC → push to client WS ---
     async def _grpc_to_ws():
         try:
             async for response in response_stream:
-                await websocket.send_bytes(response.data)
+                # Control signals are sent as JSON text frames
+                if response.signal:
+                    ctrl = {"signal": response.signal}
+                    if response.ai_text:
+                        ctrl["ai_text"] = response.ai_text
+                    await websocket.send_json(ctrl)
+                elif response.data:
+                    # Audio data — optionally attach ai_text as a preceding text frame
+                    if response.ai_text:
+                        await websocket.send_json({"ai_text": response.ai_text})
+                    await websocket.send_bytes(response.data)
         except Exception as exc:
             logger.warning("gRPC response stream error: %s", exc)
 

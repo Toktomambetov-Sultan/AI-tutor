@@ -26,7 +26,7 @@ from typing import Optional
 import chromadb
 from openai import OpenAI
 
-from conversational_agent.core.prompts import RAG_CONTEXT_HEADER, TUTOR_BASE_PROMPT, TUTOR_RAG_FOOTER
+from core.prompts import RAG_CONTEXT_HEADER, TUTOR_BASE_PROMPT, TUTOR_RAG_FOOTER
 
 logger = logging.getLogger(__name__)
 

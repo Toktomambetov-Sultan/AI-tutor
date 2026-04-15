@@ -13,6 +13,7 @@ import grpc
 from dotenv import load_dotenv
 from proto import audio_pb2_grpc
 
+from core.audio_processor import _ensure_silero_model
 from core.conversation import ConversationalAgent
 from core.grpc_servicer import AudioServicer
 
@@ -28,8 +29,9 @@ async def serve():
     port = os.environ.get("GRPC_PORT", "50051")
 
     # ── Pre-load heavy models ONCE at server startup ──
-    logger.info("Pre-loading shared resources (TTS model, etc.) ...")
+    logger.info("Pre-loading shared resources (TTS, VAD, etc.) ...")
     ConversationalAgent.load_shared_resources()
+    _ensure_silero_model()
     logger.info("Shared resources ready.")
 
     # Create Async gRPC server
