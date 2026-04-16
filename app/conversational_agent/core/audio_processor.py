@@ -1,19 +1,17 @@
 """
-Real-time audio processor with Silero VAD and adaptive silence detection.
+Real-time audio processor with Silero VAD, adaptive silence detection,
+and streaming Vosk STT.
 
 Spawns a persistent ffmpeg process that decodes a continuous WebM/Opus
 stream into 16 kHz mono PCM.  A reader thread runs Silero VAD on the
-decoded PCM and fires a callback when an utterance boundary (speech →
-silence) is detected.
-
-Improvements over the original energy-based approach:
-  - **Silero VAD** — neural model, far more accurate than RMS energy
-  - **Adaptive silence threshold** — tracks the speaker's cadence and
-    auto-adjusts how long a pause is needed to end an utterance
+decoded PCM, feeds chunks to a Vosk recognizer for real-time
+transcription, and fires a callback with the recognised text when an
+utterance boundary (speech → silence) is detected.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 import threading
@@ -58,8 +56,10 @@ class RealtimeAudioProcessor:
     """
     Spawns a persistent ffmpeg process that decodes a continuous WebM/Opus
     stream into 16 kHz mono PCM in real-time.  A reader thread runs
-    **Silero VAD** on the decoded PCM and fires a callback when an
-    utterance boundary (speech → silence) is detected.
+    **Silero VAD** on the decoded PCM, simultaneously feeding each chunk
+    to a **Vosk** recognizer for streaming speech-to-text, and fires a
+    callback with the transcribed text when an utterance boundary
+    (speech → silence) is detected.
 
     Adaptive silence detection: the processor tracks the student's
     speaking cadence and adjusts ``silence_sec`` between a floor and
@@ -76,12 +76,12 @@ class RealtimeAudioProcessor:
         max_silence_sec: float = 1.2,
         vad_threshold: float = 0.45,
         min_speech_sec: float = 0.5,
-        on_speech_paused: "callable | None" = None,
+        recognizer=None,
     ):
         _ensure_silero_model()
 
         self.on_utterance = on_utterance
-        self.on_speech_paused = on_speech_paused
+        self._recognizer = recognizer
         self.sample_rate = sample_rate
 
         # ── Adaptive silence parameters ──
@@ -274,9 +274,13 @@ class RealtimeAudioProcessor:
                     self._is_speaking = True
                     self._silence_frames = 0
                     self._pcm_buf.extend(data)
+                    if self._recognizer:
+                        self._recognizer.AcceptWaveform(data)
                 elif self._is_speaking:
                     # ── silence while we were speaking ──
                     self._pcm_buf.extend(data)
+                    if self._recognizer:
+                        self._recognizer.AcceptWaveform(data)
                     self._silence_frames += 1
 
                     if self._silence_frames == 1:
@@ -285,31 +289,37 @@ class RealtimeAudioProcessor:
                             frames_read,
                             speech_prob,
                         )
-                        # Fire eager STT so transcription overlaps
-                        # with the remaining silence-detection wait.
-                        if (
-                            self.on_speech_paused
-                            and len(self._pcm_buf) >= self.min_speech_bytes
-                        ):
-                            self.on_speech_paused(bytes(self._pcm_buf))
 
                     if self._silence_frames >= silence_frames_needed:
-                        pcm = bytes(self._pcm_buf)
+                        pcm_len = len(self._pcm_buf)
                         self._pcm_buf = bytearray()
                         self._is_speaking = False
                         self._silence_frames = 0
 
-                        if len(pcm) >= self.min_speech_bytes:
+                        if pcm_len >= self.min_speech_bytes:
+                            duration = pcm_len / (self.sample_rate * BYTES_PER_SAMPLE)
+                            # ── Get transcription from Vosk ──
+                            if self._recognizer:
+                                result = json.loads(self._recognizer.FinalResult())
+                                text = result.get("text", "")
+                            else:
+                                text = ""
+
                             logger.info(
-                                "VAD: utterance detected (%.1fs of PCM) at frame %d",
-                                len(pcm) / (self.sample_rate * BYTES_PER_SAMPLE),
+                                "VAD: utterance detected (%.1fs of PCM) "
+                                "at frame %d — text: %s",
+                                duration,
                                 frames_read,
+                                text[:120] if text else "(empty)",
                             )
                             # ── Adapt silence for next utterance ──
-                            self._adapt_silence_threshold(len(pcm))
-                            self.on_utterance(pcm)
+                            self._adapt_silence_threshold(pcm_len)
+                            self.on_utterance(text)
                         else:
                             logger.debug("VAD: utterance too short, discarding")
+                            # Reset recognizer for discarded utterance
+                            if self._recognizer:
+                                self._recognizer.FinalResult()
                 # else: silence before any speech — ignore
 
             except Exception as e:

@@ -25,6 +25,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --index-strategy unsafe-best-match \
     -r requirements.txt
 
+# Download Vosk speech-recognition models (EN + RU)
+RUN python -c "import urllib.request, zipfile, os; os.makedirs('/app/models', exist_ok=True); [(print(f'Downloading {n}...'), urllib.request.urlretrieve(u, f'/tmp/{n}.zip'), zipfile.ZipFile(f'/tmp/{n}.zip').extractall('/app/models'), os.remove(f'/tmp/{n}.zip')) for u, n in [('https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip','vosk-model-small-en-us-0.15'),('https://alphacephei.com/vosk/models/vosk-model-small-ru-0.22.zip','vosk-model-small-ru-0.22')]]; print('Done.')"
+
 # Generate gRPC Python stubs (grpc_tools needs native libs)
 COPY proto/ proto/
 RUN python -m grpc_tools.protoc \
@@ -56,6 +59,9 @@ COPY --from=builder /usr/local/bin/ /usr/local/bin/
 
 # Copy pre-generated gRPC stubs
 COPY --from=builder /app/proto/ proto/
+
+# Copy Vosk speech-recognition models
+COPY --from=builder /app/models/ models/
 
 # Application code (single layer — code changes don't bust the
 # large site-packages cache layer above)

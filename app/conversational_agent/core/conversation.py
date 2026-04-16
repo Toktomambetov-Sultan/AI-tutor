@@ -4,8 +4,10 @@ Per-session conversational agent.
 Orchestrates the full STT → RAG → LLM (streaming) → TTS pipeline for a
 single student session.
 
-Key improvements over the original implementation:
-  - **Whisper STT** via OpenAI API (replaces batch Google STT)
+Key design:
+  - **Vosk streaming STT** — audio is transcribed in real-time as the
+    student speaks; by the time the utterance boundary fires the text
+    is already available (zero STT latency).
   - **LLM streaming** with sentence-boundary chunking
   - **Per-sentence TTS** so the first audio reaches the student sooner
   - **Barge-in support** — student can interrupt mid-sentence; the agent
@@ -15,21 +17,20 @@ Key improvements over the original implementation:
 from __future__ import annotations
 
 import io
+import json
 import logging
 import os
 import queue
 import re
-import tempfile
 import threading
 
 import scipy.io.wavfile
 import torch
 from openai import OpenAI
 from pocket_tts import TTSModel
-from speech_recognition import Recognizer
+from vosk import KaldiRecognizer, Model as VoskModel, SetLogLevel
 
 from core.audio_processor import (
-    BYTES_PER_SAMPLE,
     TARGET_SAMPLE_RATE,
     RealtimeAudioProcessor,
 )
@@ -41,6 +42,9 @@ from core.prompts import (
 from core.rag import LessonRAG
 
 logger = logging.getLogger(__name__)
+
+# Suppress Vosk's own logging (we log results ourselves)
+SetLogLevel(-1)
 
 # ─── Text splitting ──────────────────────────────────────────────────
 # _SENTENCE_RE  — canonical sentence boundaries (. ! ?)
@@ -102,6 +106,34 @@ def _detect_language(text: str) -> str:
     return "ru" if cyrillic_count > len(alpha_chars) / 2 else "en"
 
 
+def _extract_text_from_lesson_context(lesson_context: str) -> str:
+    """Extract human-readable lesson content for accurate language detection."""
+    try:
+        ctx = json.loads(lesson_context)
+    except json.JSONDecodeError:
+        return lesson_context
+
+    parts: list[str] = []
+    if isinstance(ctx, dict):
+        lesson_title = ctx.get("lesson_title")
+        if isinstance(lesson_title, str):
+            parts.append(lesson_title)
+
+        materials = ctx.get("materials")
+        if isinstance(materials, list):
+            for mat in materials:
+                if not isinstance(mat, dict):
+                    continue
+                title = mat.get("title")
+                if isinstance(title, str):
+                    parts.append(title)
+                content = mat.get("content")
+                if isinstance(content, str):
+                    parts.append(content)
+
+    return " ".join(parts).strip() or lesson_context
+
+
 class ConversationalAgent:
     """Per-session agent.  Receives pre-loaded shared resources to avoid
     re-loading the TTS model on every call."""
@@ -112,8 +144,17 @@ class ConversationalAgent:
     _ru_tts_model = None
     _ru_speaker: str | None = None
     _ru_sample_rate: int | None = None
-    _recognizer = None
     _openai_client: OpenAI | None = None
+    _vosk_model_en: VoskModel | None = None
+    _vosk_model_ru: VoskModel | None = None
+
+    # ── Vosk model paths (configurable via env vars) ──
+    _VOSK_MODEL_EN = os.environ.get(
+        "VOSK_MODEL_EN", "/app/models/vosk-model-small-en-us-0.15"
+    )
+    _VOSK_MODEL_RU = os.environ.get(
+        "VOSK_MODEL_RU", "/app/models/vosk-model-small-ru-0.22"
+    )
 
     @classmethod
     def load_shared_resources(cls):
@@ -143,7 +184,21 @@ class ConversationalAgent:
             logger.warning("Failed to load Russian TTS model: %s", e)
             cls._ru_tts_model = None
 
-        cls._recognizer = Recognizer()
+        # ── Vosk STT models ──
+        logger.info("Loading Vosk EN model from %s …", cls._VOSK_MODEL_EN)
+        try:
+            cls._vosk_model_en = VoskModel(cls._VOSK_MODEL_EN)
+            logger.info("Vosk EN model loaded.")
+        except Exception as e:
+            logger.warning("Failed to load Vosk EN model: %s", e)
+
+        logger.info("Loading Vosk RU model from %s …", cls._VOSK_MODEL_RU)
+        try:
+            cls._vosk_model_ru = VoskModel(cls._VOSK_MODEL_RU)
+            logger.info("Vosk RU model loaded.")
+        except Exception as e:
+            logger.warning("Failed to load Vosk RU model: %s", e)
+
         logger.info("All shared resources loaded.")
 
     # ────────────────────────────────────────────────────────────
@@ -157,6 +212,7 @@ class ConversationalAgent:
         # ── RAG ──
         self.rag = LessonRAG(self._openai_client)
         self._lesson_ready = False
+        self._language = "en"  # determined from lesson materials
 
         if lesson_context:
             self._init_lesson(lesson_context)
@@ -173,20 +229,27 @@ class ConversationalAgent:
         # ── Session state ──
         self._processing = False
         self._processing_lock = threading.Lock()
-        self._pending_utterance: bytes | None = None  # queued when user interrupts
+        self._pending_utterance: str | None = None  # queued when user interrupts
         self._first_turn = True
 
-        # ── Eager STT — start transcribing while silence is still
-        #    being measured so that the text is ready by the time the
-        #    utterance boundary fires. ──
-        self._eager_stt_result: str | None = None
-        self._eager_stt_pcm_len: int = 0
-        self._eager_stt_done = threading.Event()
-        self._eager_stt_lock = threading.Lock()
+        # ── Vosk recognizer for this session ──
+        vosk_model = (
+            self._vosk_model_ru
+            if self._language == "ru" and self._vosk_model_ru
+            else self._vosk_model_en
+        )
+        recognizer = (
+            KaldiRecognizer(vosk_model, TARGET_SAMPLE_RATE) if vosk_model else None
+        )
+        logger.info(
+            "Session language=%s, Vosk recognizer=%s",
+            self._language,
+            "ready" if recognizer else "unavailable",
+        )
 
         self._processor = RealtimeAudioProcessor(
             on_utterance=self._on_utterance_detected,
-            on_speech_paused=self._on_speech_paused,
+            recognizer=recognizer,
         )
 
     # ────────────────────────────────────────────────────────────
@@ -229,59 +292,6 @@ class ConversationalAgent:
         """Clean up ffmpeg and RAG resources."""
         self._processor.close()
         self.rag.close()
-
-    # ────────────────────────────────────────────────────────────
-    # Eager STT — transcribe during silence detection
-    # ────────────────────────────────────────────────────────────
-
-    def _on_speech_paused(self, pcm_data: bytes):
-        """Called by VAD at the first silence frame after speech.
-
-        Kicks off a background Whisper API call so that the
-        transcription overlaps with the remaining silence-detection
-        wait (~0.5-1 s).  When the full utterance boundary fires,
-        ``_handle_turn`` checks whether the eager result is already
-        available and skips a second Whisper call.
-        """
-        with self._eager_stt_lock:
-            self._eager_stt_result = None
-            self._eager_stt_pcm_len = len(pcm_data)
-            self._eager_stt_done.clear()
-
-        def _background():
-            text = self._transcribe(pcm_data)
-            with self._eager_stt_lock:
-                self._eager_stt_result = text
-                self._eager_stt_pcm_len = len(pcm_data)
-            self._eager_stt_done.set()
-            logger.info("Eager STT finished: %s", text[:120] if text else "(empty)")
-
-        threading.Thread(target=_background, daemon=True).start()
-
-    def _get_eager_or_transcribe(self, pcm_data: bytes) -> str:
-        """Return transcription text, preferring the eager result.
-
-        If the eager background transcription already finished (or
-        finishes within a short wait) and it covered at least 70 % of
-        the final utterance length, use that result directly — saving
-        a full Whisper round-trip.  Otherwise fall back to a fresh
-        ``_transcribe`` call.
-        """
-        # Wait briefly — the eager call started ~silence_sec ago, so
-        # it should be nearly done (or already done).
-        if self._eager_stt_done.wait(timeout=2.0):
-            with self._eager_stt_lock:
-                # Use if the eager audio is ≥ 70 % of the final PCM
-                if self._eager_stt_pcm_len >= len(pcm_data) * 0.7:
-                    text = self._eager_stt_result or ""
-                    logger.info(
-                        "Using eager STT result (covered %.0f%% of utterance)",
-                        self._eager_stt_pcm_len / len(pcm_data) * 100,
-                    )
-                    return text
-
-        logger.info("Eager STT miss — running full transcription")
-        return self._transcribe(pcm_data)
 
     # ────────────────────────────────────────────────────────────
     # Conversation history compression
@@ -355,97 +365,18 @@ class ConversationalAgent:
             self.rag.ingest(lesson_context)
             self.context = self.rag.build_system_prompt()
             self._lesson_ready = True
+            self._language = _detect_language(
+                _extract_text_from_lesson_context(lesson_context)
+            )
             logger.info(
-                "Lesson RAG ready: %d chunks indexed for %r",
+                "Lesson RAG ready: %d chunks indexed for %r (language=%s)",
                 self.rag.chunk_count,
                 self.rag.lesson_title,
+                self._language,
             )
         except Exception as e:
             logger.error("Failed to initialise lesson RAG: %s", e, exc_info=True)
             self.context = FALLBACK_SYSTEM_PROMPT
-
-    # ────────────────────────────────────────────────────────────
-    # STT — Whisper via OpenAI API
-    # ────────────────────────────────────────────────────────────
-
-    def _transcribe(self, pcm_data: bytes) -> str:
-        """Transcribe raw 16 kHz mono PCM using OpenAI Whisper API.
-
-        Speed optimisations:
-          - Trim leading/trailing silence so Whisper processes less audio.
-          - Encode as OGG/Opus (~10× smaller than WAV) for faster upload.
-          - Use ``response_format="text"`` to skip JSON overhead.
-        """
-        import numpy as np
-        import subprocess as _sp
-
-        samples = np.frombuffer(pcm_data, dtype=np.int16)
-
-        # ── Trim silence (threshold: ~1 % of int16 range) ──
-        threshold = 500
-        above = np.nonzero(np.abs(samples) > threshold)[0]
-        if len(above) == 0:
-            logger.info("Whisper STT: audio is silence, skipping")
-            return ""
-        # Keep a small margin (160 samples = 10 ms @ 16 kHz)
-        margin = 160
-        start = max(0, above[0] - margin)
-        end = min(len(samples), above[-1] + margin)
-        samples = samples[start:end]
-
-        # ── Encode to OGG/Opus via ffmpeg (in-memory) ──
-        wav_buf = io.BytesIO()
-        scipy.io.wavfile.write(wav_buf, TARGET_SAMPLE_RATE, samples)
-        wav_bytes = wav_buf.getvalue()
-
-        try:
-            proc = _sp.run(
-                [
-                    "ffmpeg",
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-f",
-                    "wav",
-                    "-i",
-                    "pipe:0",
-                    "-c:a",
-                    "libopus",
-                    "-b:a",
-                    "32k",
-                    "-f",
-                    "ogg",
-                    "pipe:1",
-                ],
-                input=wav_bytes,
-                capture_output=True,
-                timeout=10,
-            )
-            if proc.returncode == 0 and proc.stdout:
-                upload_buf = io.BytesIO(proc.stdout)
-                upload_buf.name = "speech.ogg"
-            else:
-                # Fallback to WAV if ffmpeg encoding fails
-                logger.warning("OGG encoding failed, falling back to WAV")
-                upload_buf = io.BytesIO(wav_bytes)
-                upload_buf.name = "speech.wav"
-        except Exception:
-            upload_buf = io.BytesIO(wav_bytes)
-            upload_buf.name = "speech.wav"
-
-        try:
-            result = self._openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=upload_buf,
-                response_format="text",
-            )
-            # With response_format="text", result is a plain string
-            text = result.strip() if isinstance(result, str) else result.text.strip()
-            logger.info("Whisper STT: %s", text)
-            return text
-        except Exception as e:
-            logger.warning("Whisper STT failed: %s", e)
-            return ""
 
     # ────────────────────────────────────────────────────────────
     # TTS helper (unchanged engine, but per-sentence now)
@@ -679,7 +610,7 @@ class ConversationalAgent:
     # Turn handling
     # ────────────────────────────────────────────────────────────
 
-    def _on_utterance_detected(self, pcm_data: bytes):
+    def _on_utterance_detected(self, text: str):
         with self._processing_lock:
             if self._processing:
                 # User spoke while AI is still responding — trigger interrupt
@@ -687,39 +618,36 @@ class ConversationalAgent:
                 # turn finishes.
                 logger.info(
                     "User spoke during AI turn — triggering interrupt, "
-                    "queuing utterance (%d bytes)",
-                    len(pcm_data),
+                    "queuing utterance: %s",
+                    text[:120] if text else "(empty)",
                 )
-                self._pending_utterance = pcm_data
+                self._pending_utterance = text
                 self.handle_interrupt()
                 return
             self._processing = True
 
-        threading.Thread(
-            target=self._handle_turn, args=(pcm_data,), daemon=True
-        ).start()
+        threading.Thread(target=self._handle_turn, args=(text,), daemon=True).start()
 
     def _process_pending_utterance(self):
         """If a student utterance arrived during the previous AI turn,
         process it now."""
-        pcm = self._pending_utterance
+        text = self._pending_utterance
         self._pending_utterance = None
-        if pcm is not None:
-            logger.info("Processing pending interrupt utterance (%d bytes)", len(pcm))
-            # Reset processing flag so _on_utterance_detected can acquire it
-            self._on_utterance_detected(pcm)
+        if text is not None:
+            logger.info("Processing pending interrupt utterance: %s", text[:120])
+            self._on_utterance_detected(text)
 
-    def _handle_turn(self, pcm_data: bytes):
+    def _handle_turn(self, text: str):
         try:
-            duration = len(pcm_data) / (TARGET_SAMPLE_RATE * BYTES_PER_SAMPLE)
-            logger.info("Processing speech turn (%.1fs of PCM) ...", duration)
+            text = text.strip()
+            if not text:
+                return
+            logger.info("Processing speech turn — text: %s", text[:200])
 
-            # ── 1. STT — try eager result first, fall back to fresh call ──
-            text = self._get_eager_or_transcribe(pcm_data)
-            if not text or text.strip().lower() in ("quit", "exit", "stop"):
+            if text.lower() in ("quit", "exit", "stop"):
                 return
 
-            # ── 1b. Build interrupt context if the student interrupted ──
+            # ── 1. Build interrupt context if the student interrupted ──
             interrupt_note = ""
             if self._interrupted.is_set() and self._spoken_sentences:
                 spoken_so_far = " ".join(self._spoken_sentences)

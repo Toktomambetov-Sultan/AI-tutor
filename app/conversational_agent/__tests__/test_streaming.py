@@ -54,11 +54,13 @@ except ImportError:
     sys.modules["scipy.io.wavfile"] = _scipy_wavfile
 
 try:
-    import speech_recognition  # noqa: F401
+    import vosk  # noqa: F401
 except ImportError:
-    _sr = ModuleType("speech_recognition")
-    _sr.Recognizer = MagicMock
-    sys.modules["speech_recognition"] = _sr
+    _vosk = ModuleType("vosk")
+    _vosk.Model = MagicMock
+    _vosk.KaldiRecognizer = MagicMock
+    _vosk.SetLogLevel = MagicMock()
+    sys.modules["vosk"] = _vosk
 
 # ── openai: ensure the OpenAI class exists (old pip version lacks it) ──
 try:
@@ -177,7 +179,7 @@ class TestInterruptHandling:
         ) as mock_tts, patch(
             "core.conversation.ConversationalAgent._voice_state"
         ), patch(
-            "core.conversation.ConversationalAgent._recognizer"
+            "core.conversation.ConversationalAgent._vosk_model_en"
         ), patch(
             "core.conversation.ConversationalAgent._openai_client"
         ) as mock_openai, patch(
@@ -271,7 +273,7 @@ class TestTTSQueueing:
         ) as mock_tts, patch(
             "core.conversation.ConversationalAgent._voice_state"
         ), patch(
-            "core.conversation.ConversationalAgent._recognizer"
+            "core.conversation.ConversationalAgent._vosk_model_en"
         ), patch(
             "core.conversation.ConversationalAgent._openai_client"
         ), patch(
@@ -360,12 +362,12 @@ class TestStreamLLMAndSpeak:
         # Patch class-level attributes directly
         orig_tts = ConversationalAgent._tts_model
         orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._recognizer
+        orig_rec = ConversationalAgent._vosk_model_en
         orig_client = ConversationalAgent._openai_client
 
         ConversationalAgent._tts_model = mock_tts
         ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._recognizer = MagicMock()
+        ConversationalAgent._vosk_model_en = MagicMock()
         ConversationalAgent._openai_client = mock_openai
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
@@ -392,7 +394,7 @@ class TestStreamLLMAndSpeak:
         orig_tts, orig_vs, orig_rec, orig_client = agent._orig
         ConversationalAgent._tts_model = orig_tts
         ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._recognizer = orig_rec
+        ConversationalAgent._vosk_model_en = orig_rec
         ConversationalAgent._openai_client = orig_client
 
     def _make_stream_chunks(self, tokens):
@@ -502,7 +504,6 @@ class TestStreamLLMAndSpeak:
         agent, queue, loop, mock_openai = self._make_agent()
         try:
             agent._lesson_ready = False
-            agent._transcribe = MagicMock(return_value="What did you say?")
             agent._stream_llm_and_speak = MagicMock(
                 return_value="Actually spoken part."
             )
@@ -510,7 +511,7 @@ class TestStreamLLMAndSpeak:
             agent._current_ai_text = "Actually spoken part. Unspoken remainder."
             agent._interrupted.set()
 
-            agent._handle_turn(b"\x00" * 32000)
+            agent._handle_turn("What did you say?")
 
             assert agent.messages[-1] == {
                 "role": "assistant",
@@ -531,7 +532,7 @@ class TestStreamLLMAndSpeak:
     def test_pending_utterance_is_processed_after_interrupt(self):
         agent, queue, loop, mock_openai = self._make_agent()
         try:
-            pending = b"pending-pcm"
+            pending = "pending text from user"
             agent._processing = True
             agent._handle_turn = MagicMock()
 
@@ -552,12 +553,12 @@ class TestStreamLLMAndSpeak:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 5.  Whisper STT (_transcribe) with mocked API
+# 5.  Vosk streaming STT
 # ─────────────────────────────────────────────────────────────────────
 
 
-class TestWhisperSTT:
-    """Test _transcribe with a mocked OpenAI Whisper response."""
+class TestVoskStreamingSTT:
+    """Test that ConversationalAgent uses Vosk streaming STT correctly."""
 
     def _make_agent(self):
         from core.conversation import ConversationalAgent
@@ -568,12 +569,12 @@ class TestWhisperSTT:
 
         orig_tts = ConversationalAgent._tts_model
         orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._recognizer
+        orig_rec = ConversationalAgent._vosk_model_en
         orig_client = ConversationalAgent._openai_client
 
         ConversationalAgent._tts_model = mock_tts
         ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._recognizer = MagicMock()
+        ConversationalAgent._vosk_model_en = MagicMock()
         ConversationalAgent._openai_client = mock_openai
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
@@ -599,56 +600,116 @@ class TestWhisperSTT:
         orig_tts, orig_vs, orig_rec, orig_client = agent._orig
         ConversationalAgent._tts_model = orig_tts
         ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._recognizer = orig_rec
+        ConversationalAgent._vosk_model_en = orig_rec
         ConversationalAgent._openai_client = orig_client
 
-    def test_transcribe_returns_text(self):
+    def test_recognizer_parameter_accepted(self):
+        """Agent init should succeed and create a processor with a recognizer."""
+        agent, _ = self._make_agent()
+        try:
+            # Processor is mocked, just verify agent was created
+            assert agent._processor is not None
+        finally:
+            self._cleanup(agent)
+
+    def test_handle_turn_receives_text(self):
+        """_handle_turn now receives text (str), not PCM bytes."""
         agent, mock_openai = self._make_agent()
         try:
-            # With response_format="text", the API returns a plain string
-            mock_openai.audio.transcriptions.create.return_value = (
-                "  Hello, this is a test.  "
+            mock_stream = MagicMock()
+            mock_stream.__iter__ = MagicMock(return_value=iter([]))
+            mock_openai.chat.completions.create.return_value = mock_stream
+
+            agent._lesson_ready = False
+            agent._handle_turn("Hello world")
+
+            assert any(
+                msg.get("role") == "user" and "Hello world" in msg.get("content", "")
+                for msg in agent.messages
             )
-
-            import numpy as np
-
-            # Create fake PCM data (1 second of tone at 16kHz so silence
-            # trimming doesn't discard everything)
-            t = np.linspace(0, 1, 16000, dtype=np.float64)
-            pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
-            result = agent._transcribe(pcm)
-
-            assert result == "Hello, this is a test."
-            mock_openai.audio.transcriptions.create.assert_called_once()
         finally:
             self._cleanup(agent)
 
-    def test_transcribe_handles_api_error(self):
+    def test_empty_text_skipped(self):
+        """Empty/whitespace-only transcriptions should be ignored."""
         agent, mock_openai = self._make_agent()
         try:
-            mock_openai.audio.transcriptions.create.side_effect = Exception("API down")
+            agent._lesson_ready = False
+            agent._handle_turn("   ")
 
-            import numpy as np
-
-            t = np.linspace(0, 1, 16000, dtype=np.float64)
-            pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
-            result = agent._transcribe(pcm)
-
-            assert result == ""  # graceful fallback
+            user_msgs = [m for m in agent.messages if m.get("role") == "user"]
+            assert len(user_msgs) == 0
+            mock_openai.chat.completions.create.assert_not_called()
         finally:
             self._cleanup(agent)
 
-    def test_transcribe_skips_silence(self):
-        agent, mock_openai = self._make_agent()
+
+class TestLanguageFromMaterials:
+    """Test that language is detected from lesson materials."""
+
+    def _make_agent(self, lesson_context=""):
+        from core.conversation import ConversationalAgent
+
+        mock_openai = MagicMock()
+        mock_tts = MagicMock()
+        mock_tts.sample_rate = 22050
+
+        orig_tts = ConversationalAgent._tts_model
+        orig_vs = ConversationalAgent._voice_state
+        orig_rec = ConversationalAgent._vosk_model_en
+        orig_client = ConversationalAgent._openai_client
+
+        ConversationalAgent._tts_model = mock_tts
+        ConversationalAgent._voice_state = MagicMock()
+        ConversationalAgent._vosk_model_en = MagicMock()
+        ConversationalAgent._openai_client = mock_openai
+
+        with patch("core.conversation.RealtimeAudioProcessor"), patch(
+            "core.conversation.LessonRAG"
+        ) as mock_rag:
+            mock_rag_inst = MagicMock()
+            mock_rag.return_value = mock_rag_inst
+            mock_rag_inst.ingest = MagicMock()
+            mock_rag_inst.build_system_prompt = MagicMock(return_value="sys")
+            mock_rag_inst.chunk_count = 1
+            mock_rag_inst.lesson_title = "T"
+
+            loop = asyncio.new_event_loop()
+            queue = asyncio.Queue()
+            agent = ConversationalAgent(queue, loop, lesson_context=lesson_context)
+
+        agent._orig = (orig_tts, orig_vs, orig_rec, orig_client)
+        return agent
+
+    def _cleanup(self, agent):
+        from core.conversation import ConversationalAgent
+
+        orig_tts, orig_vs, orig_rec, orig_client = agent._orig
+        ConversationalAgent._tts_model = orig_tts
+        ConversationalAgent._voice_state = orig_vs
+        ConversationalAgent._vosk_model_en = orig_rec
+        ConversationalAgent._openai_client = orig_client
+
+    def test_english_materials_set_en(self):
+        agent = self._make_agent("Photosynthesis is the process plants use.")
         try:
-            import numpy as np
+            assert agent._language == "en"
+        finally:
+            self._cleanup(agent)
 
-            # Pure silence — should return empty without calling API
-            pcm = np.zeros(16000, dtype=np.int16).tobytes()
-            result = agent._transcribe(pcm)
+    def test_russian_materials_set_ru(self):
+        agent = self._make_agent(
+            "Фотосинтез — это процесс, при котором растения используют свет."
+        )
+        try:
+            assert agent._language == "ru"
+        finally:
+            self._cleanup(agent)
 
-            assert result == ""
-            mock_openai.audio.transcriptions.create.assert_not_called()
+    def test_no_materials_defaults_to_en(self):
+        agent = self._make_agent("")
+        try:
+            assert agent._language == "en"
         finally:
             self._cleanup(agent)
 
@@ -792,12 +853,12 @@ class TestHistoryCompression:
 
         orig_tts = ConversationalAgent._tts_model
         orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._recognizer
+        orig_rec = ConversationalAgent._vosk_model_en
         orig_client = ConversationalAgent._openai_client
 
         ConversationalAgent._tts_model = mock_tts
         ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._recognizer = MagicMock()
+        ConversationalAgent._vosk_model_en = MagicMock()
         ConversationalAgent._openai_client = mock_openai
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
@@ -823,7 +884,7 @@ class TestHistoryCompression:
         orig_tts, orig_vs, orig_rec, orig_client = agent._orig
         ConversationalAgent._tts_model = orig_tts
         ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._recognizer = orig_rec
+        ConversationalAgent._vosk_model_en = orig_rec
         ConversationalAgent._openai_client = orig_client
 
     def test_no_compression_below_threshold(self):
@@ -948,7 +1009,7 @@ class TestRussianTTS:
 
         orig_tts = ConversationalAgent._tts_model
         orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._recognizer
+        orig_rec = ConversationalAgent._vosk_model_en
         orig_client = ConversationalAgent._openai_client
         orig_ru_tts = ConversationalAgent._ru_tts_model
         orig_ru_speaker = ConversationalAgent._ru_speaker
@@ -956,7 +1017,7 @@ class TestRussianTTS:
 
         ConversationalAgent._tts_model = mock_tts
         ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._recognizer = MagicMock()
+        ConversationalAgent._vosk_model_en = MagicMock()
         ConversationalAgent._openai_client = mock_openai
         ConversationalAgent._ru_tts_model = mock_ru_tts
         ConversationalAgent._ru_speaker = "baya"
@@ -1001,7 +1062,7 @@ class TestRussianTTS:
         ) = agent._orig
         ConversationalAgent._tts_model = orig_tts
         ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._recognizer = orig_rec
+        ConversationalAgent._vosk_model_en = orig_rec
         ConversationalAgent._openai_client = orig_client
         ConversationalAgent._ru_tts_model = orig_ru_tts
         ConversationalAgent._ru_speaker = orig_ru_speaker
@@ -1059,12 +1120,12 @@ class TestSentenceDeliveryOnInterrupt:
 
         orig_tts = ConversationalAgent._tts_model
         orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._recognizer
+        orig_rec = ConversationalAgent._vosk_model_en
         orig_client = ConversationalAgent._openai_client
 
         ConversationalAgent._tts_model = mock_tts
         ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._recognizer = MagicMock()
+        ConversationalAgent._vosk_model_en = MagicMock()
         ConversationalAgent._openai_client = mock_openai
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
@@ -1090,7 +1151,7 @@ class TestSentenceDeliveryOnInterrupt:
         orig_tts, orig_vs, orig_rec, orig_client = agent._orig
         ConversationalAgent._tts_model = orig_tts
         ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._recognizer = orig_rec
+        ConversationalAgent._vosk_model_en = orig_rec
         ConversationalAgent._openai_client = orig_client
 
     def test_full_sentence_audio_delivered(self):
@@ -1157,120 +1218,7 @@ class TestReducedVADThresholds:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 13. STT optimisations (silence trimming, OGG encoding)
-# ─────────────────────────────────────────────────────────────────────
-
-
-class TestSTTOptimisations:
-    """Test that _transcribe trims silence and sends OGG when possible."""
-
-    def _make_agent(self):
-        from core.conversation import ConversationalAgent
-
-        mock_openai = MagicMock()
-        mock_tts = MagicMock()
-        mock_tts.sample_rate = 22050
-
-        orig_tts = ConversationalAgent._tts_model
-        orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._recognizer
-        orig_client = ConversationalAgent._openai_client
-
-        ConversationalAgent._tts_model = mock_tts
-        ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._recognizer = MagicMock()
-        ConversationalAgent._openai_client = mock_openai
-
-        with patch("core.conversation.RealtimeAudioProcessor"), patch(
-            "core.conversation.LessonRAG"
-        ) as mock_rag:
-            mock_rag_inst = MagicMock()
-            mock_rag.return_value = mock_rag_inst
-            mock_rag_inst.ingest = MagicMock()
-            mock_rag_inst.build_system_prompt = MagicMock(return_value="sys")
-            mock_rag_inst.chunk_count = 0
-            mock_rag_inst.lesson_title = "T"
-
-            loop = asyncio.new_event_loop()
-            queue = asyncio.Queue()
-            agent = ConversationalAgent(queue, loop)
-
-        agent._orig = (orig_tts, orig_vs, orig_rec, orig_client)
-        return agent, mock_openai
-
-    def _cleanup(self, agent):
-        from core.conversation import ConversationalAgent
-
-        orig_tts, orig_vs, orig_rec, orig_client = agent._orig
-        ConversationalAgent._tts_model = orig_tts
-        ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._recognizer = orig_rec
-        ConversationalAgent._openai_client = orig_client
-
-    def test_ogg_filename_sent_to_api(self):
-        """When ffmpeg is available, the uploaded file should be OGG."""
-        agent, mock_openai = self._make_agent()
-        try:
-            mock_openai.audio.transcriptions.create.return_value = "Hello"
-
-            import numpy as np
-
-            t = np.linspace(0, 1, 16000, dtype=np.float64)
-            pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
-            agent._transcribe(pcm)
-
-            call_kwargs = mock_openai.audio.transcriptions.create.call_args
-            uploaded_file = call_kwargs.kwargs.get("file") or call_kwargs[1].get("file")
-            # Should be .ogg if ffmpeg is present, .wav otherwise
-            assert uploaded_file.name.endswith((".ogg", ".wav"))
-        finally:
-            self._cleanup(agent)
-
-    def test_response_format_is_text(self):
-        """Verify response_format='text' is passed to the API."""
-        agent, mock_openai = self._make_agent()
-        try:
-            mock_openai.audio.transcriptions.create.return_value = "Test"
-
-            import numpy as np
-
-            t = np.linspace(0, 1, 16000, dtype=np.float64)
-            pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
-            agent._transcribe(pcm)
-
-            call_kwargs = mock_openai.audio.transcriptions.create.call_args
-            assert call_kwargs.kwargs.get("response_format") == "text"
-        finally:
-            self._cleanup(agent)
-
-    def test_trimmed_audio_is_shorter(self):
-        """Audio with silence padding should be trimmed before upload."""
-        agent, mock_openai = self._make_agent()
-        try:
-            mock_openai.audio.transcriptions.create.return_value = "Word"
-
-            import numpy as np
-
-            # 3 seconds: 1s silence + 1s tone + 1s silence
-            silence = np.zeros(16000, dtype=np.int16)
-            t = np.linspace(0, 1, 16000, dtype=np.float64)
-            tone = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16)
-            pcm = np.concatenate([silence, tone, silence]).tobytes()
-
-            agent._transcribe(pcm)
-
-            call_kwargs = mock_openai.audio.transcriptions.create.call_args
-            uploaded_file = call_kwargs.kwargs.get("file") or call_kwargs[1].get("file")
-            uploaded_size = len(uploaded_file.read())
-            # Original WAV would be ~96KB (3s * 16000 * 2 + 44 header)
-            # Trimmed should be much smaller (roughly 1s + margins)
-            assert uploaded_size < 48000 + 200  # less than ~1.5s of WAV
-        finally:
-            self._cleanup(agent)
-
-
-# ─────────────────────────────────────────────────────────────────────
-# 14. Russian TTS integration (real model, requires Docker)
+# 13. Russian TTS integration (real model, requires Docker)
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -1351,213 +1299,70 @@ class TestRussianTTSIntegration:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 15. on_speech_paused callback in RealtimeAudioProcessor
+# 14. Vosk integration (requires Docker with Vosk models)
 # ─────────────────────────────────────────────────────────────────────
 
 
-class TestOnSpeechPausedCallback:
-    """Verify that the VAD fires on_speech_paused at the first silence
-    frame after speech, and that it passes the PCM buffer."""
+@pytest.mark.skipif(
+    not hasattr(sys.modules.get("vosk", None), "__file__"),
+    reason="Real vosk required (run in Docker)",
+)
+class TestVoskIntegration:
+    """Integration tests for Vosk streaming STT.
 
-    def test_init_accepts_on_speech_paused(self):
-        """on_speech_paused parameter is accepted and stored."""
-        import inspect
-        from core.audio_processor import RealtimeAudioProcessor
+    These tests load the actual Vosk model and run recognition on
+    synthetic PCM.  Skipped outside Docker.
+    """
 
-        sig = inspect.signature(RealtimeAudioProcessor.__init__)
-        assert "on_speech_paused" in sig.parameters
-        assert sig.parameters["on_speech_paused"].default is None
+    @pytest.fixture(autouse=True)
+    def _load_model(self):
+        from vosk import Model as _VoskModel, KaldiRecognizer as _KaldiRec
+        import json as _json
 
-
-# ─────────────────────────────────────────────────────────────────────
-# 16. Eager STT — transcribe during silence detection
-# ─────────────────────────────────────────────────────────────────────
-
-
-class TestEagerSTT:
-    """Test the eager STT optimisation that starts Whisper transcription
-    at the first silence frame, overlapping with the silence-detection
-    wait."""
-
-    def _make_agent(self):
-        from core.conversation import ConversationalAgent
-
-        mock_openai = MagicMock()
-        mock_tts = MagicMock()
-        mock_tts.sample_rate = 22050
-
-        orig_tts = ConversationalAgent._tts_model
-        orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._recognizer
-        orig_client = ConversationalAgent._openai_client
-
-        ConversationalAgent._tts_model = mock_tts
-        ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._recognizer = MagicMock()
-        ConversationalAgent._openai_client = mock_openai
-
-        with patch("core.conversation.RealtimeAudioProcessor"), patch(
-            "core.conversation.LessonRAG"
-        ) as mock_rag:
-            mock_rag_inst = MagicMock()
-            mock_rag.return_value = mock_rag_inst
-            mock_rag_inst.ingest = MagicMock()
-            mock_rag_inst.build_system_prompt = MagicMock(return_value="sys")
-            mock_rag_inst.chunk_count = 0
-            mock_rag_inst.lesson_title = "T"
-
-            loop = asyncio.new_event_loop()
-            q = asyncio.Queue()
-            agent = ConversationalAgent(q, loop)
-
-        agent._orig = (orig_tts, orig_vs, orig_rec, orig_client)
-        return agent, mock_openai
-
-    def _cleanup(self, agent):
-        from core.conversation import ConversationalAgent
-
-        orig_tts, orig_vs, orig_rec, orig_client = agent._orig
-        ConversationalAgent._tts_model = orig_tts
-        ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._recognizer = orig_rec
-        ConversationalAgent._openai_client = orig_client
-
-    def test_eager_state_initialised(self):
-        """Agent should initialise eager STT state vars."""
-        agent, _ = self._make_agent()
+        model_path = "/app/models/vosk-model-small-en-us-0.15"
         try:
-            assert agent._eager_stt_result is None
-            assert agent._eager_stt_pcm_len == 0
-            assert not agent._eager_stt_done.is_set()
-        finally:
-            self._cleanup(agent)
+            self.model = _VoskModel(model_path)
+        except Exception:
+            pytest.skip(f"Vosk model not found at {model_path}")
+        self.sample_rate = 16000
+        self._json = _json
+        self._KaldiRec = _KaldiRec
 
-    def test_on_speech_paused_starts_background_transcription(self):
-        """_on_speech_paused should kick off a background Whisper call."""
-        agent, mock_openai = self._make_agent()
+    def test_recognizer_accepts_silence(self):
+        """Recognizer should return empty text for silence."""
+        import numpy as np
+
+        rec = self._KaldiRec(self.model, self.sample_rate)
+        silence = np.zeros(self.sample_rate, dtype=np.int16).tobytes()
+        rec.AcceptWaveform(silence)
+        result = self._json.loads(rec.FinalResult())
+        assert result.get("text", "") == ""
+
+    def test_recognizer_returns_text_for_speech(self):
+        """Recognizer should produce a result for a tone
+        (may not be meaningful, but shouldn't crash)."""
+        import numpy as np
+
+        rec = self._KaldiRec(self.model, self.sample_rate)
+        t = np.linspace(0, 1, self.sample_rate, dtype=np.float64)
+        pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
+        rec.AcceptWaveform(pcm)
+        result = self._json.loads(rec.FinalResult())
+        assert "text" in result
+
+    def test_russian_model_loads(self):
+        """Verify the Russian Vosk model can be loaded."""
+        from vosk import Model as _VoskModel
+
+        ru_model_path = "/app/models/vosk-model-small-ru-0.22"
         try:
-            mock_openai.audio.transcriptions.create.return_value = "Hello world"
+            ru_model = _VoskModel(ru_model_path)
+        except Exception:
+            pytest.skip(f"Russian Vosk model not found at {ru_model_path}")
+        rec = self._KaldiRec(ru_model, self.sample_rate)
+        import numpy as np
 
-            import numpy as np
-
-            t = np.linspace(0, 1, 16000, dtype=np.float64)
-            pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
-
-            agent._on_speech_paused(pcm)
-
-            # Wait for the background thread to finish
-            assert agent._eager_stt_done.wait(timeout=5.0)
-
-            with agent._eager_stt_lock:
-                assert agent._eager_stt_result == "Hello world"
-                assert agent._eager_stt_pcm_len == len(pcm)
-        finally:
-            self._cleanup(agent)
-
-    def test_get_eager_uses_cached_result(self):
-        """When eager result covers ≥70% of utterance, use it directly."""
-        agent, mock_openai = self._make_agent()
-        try:
-            # Pre-populate eager state as if background thread finished
-            pcm_data = b"\x00" * 16000
-            with agent._eager_stt_lock:
-                agent._eager_stt_result = "Eager text"
-                # Eager covered 100% of utterance
-                agent._eager_stt_pcm_len = len(pcm_data)
-            agent._eager_stt_done.set()
-
-            result = agent._get_eager_or_transcribe(pcm_data)
-            assert result == "Eager text"
-            # _transcribe should NOT have been called again
-            mock_openai.audio.transcriptions.create.assert_not_called()
-        finally:
-            self._cleanup(agent)
-
-    def test_get_eager_uses_result_at_70_percent(self):
-        """Eager result is used when it covers exactly 70% of final PCM."""
-        agent, mock_openai = self._make_agent()
-        try:
-            full_pcm = b"\x00" * 10000
-            with agent._eager_stt_lock:
-                agent._eager_stt_result = "Partial text"
-                # 70% coverage
-                agent._eager_stt_pcm_len = 7000
-            agent._eager_stt_done.set()
-
-            result = agent._get_eager_or_transcribe(full_pcm)
-            assert result == "Partial text"
-            mock_openai.audio.transcriptions.create.assert_not_called()
-        finally:
-            self._cleanup(agent)
-
-    def test_get_eager_falls_back_when_coverage_low(self):
-        """When eager result covers <70% of utterance, re-transcribe."""
-        agent, mock_openai = self._make_agent()
-        try:
-            mock_openai.audio.transcriptions.create.return_value = "Full text"
-
-            import numpy as np
-
-            t = np.linspace(0, 1, 16000, dtype=np.float64)
-            full_pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
-            with agent._eager_stt_lock:
-                agent._eager_stt_result = "Partial"
-                # Only 50% coverage — too little
-                agent._eager_stt_pcm_len = len(full_pcm) // 2
-            agent._eager_stt_done.set()
-
-            result = agent._get_eager_or_transcribe(full_pcm)
-            assert result == "Full text"
-            # _transcribe should have been called
-            mock_openai.audio.transcriptions.create.assert_called_once()
-        finally:
-            self._cleanup(agent)
-
-    def test_get_eager_falls_back_when_no_eager(self):
-        """When no eager STT was started, fall back to full transcription."""
-        agent, mock_openai = self._make_agent()
-        try:
-            mock_openai.audio.transcriptions.create.return_value = "Fresh text"
-
-            import numpy as np
-
-            t = np.linspace(0, 1, 16000, dtype=np.float64)
-            full_pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
-
-            # _eager_stt_done is NOT set — Event starts unset
-            result = agent._get_eager_or_transcribe(full_pcm)
-            assert result == "Fresh text"
-            mock_openai.audio.transcriptions.create.assert_called_once()
-        finally:
-            self._cleanup(agent)
-
-    def test_on_speech_paused_resets_previous_eager(self):
-        """A new _on_speech_paused call should discard the old result."""
-        agent, mock_openai = self._make_agent()
-        try:
-            # Simulate a completed first eager result
-            agent._eager_stt_result = "Old result"
-            agent._eager_stt_pcm_len = 5000
-            agent._eager_stt_done.set()
-
-            # Now a new pause fires — should clear old state
-            mock_openai.audio.transcriptions.create.return_value = "New result"
-
-            import numpy as np
-
-            t = np.linspace(0, 1, 16000, dtype=np.float64)
-            pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
-
-            agent._on_speech_paused(pcm)
-
-            # Immediately after calling, the old result should be cleared
-            with agent._eager_stt_lock:
-                assert agent._eager_stt_result is None
-
-            # Wait for the new background call to finish
-            assert agent._eager_stt_done.wait(timeout=5.0)
-
-            with agent._eager_stt_lock:
-                assert agent._eager_stt_result == "New result"
-        finally:
-            self._cleanup(agent)
+        silence = np.zeros(self.sample_rate, dtype=np.int16).tobytes()
+        rec.AcceptWaveform(silence)
+        result = self._json.loads(rec.FinalResult())
+        assert "text" in result
