@@ -104,7 +104,11 @@ class AudioServicer:
                     )
 
                     if msg_type == "signal":
-                        # Control signal — send immediately with no audio
+                        if data == "interrupt":
+                            # Interrupt — discard any buffered audio so
+                            # the client receives the signal immediately.
+                            audio_buffer = bytearray()
+                            current_ai_text = ""
                         yield audio_pb2.AudioChunk(signal=data)
 
                     elif msg_type == "audio":

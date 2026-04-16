@@ -19,3 +19,6 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["__tests__"]
 pythonpath = ["."]
+markers = [
+    "integration: end-to-end tests that exercise the running gRPC service",
+]

@@ -35,6 +35,37 @@ load_dotenv()
 from core.rag import _chunk_text, LessonRAG
 
 
+class _FakeCollection:
+    def __init__(self, name: str):
+        self.name = name
+        self._documents: list[str] = []
+
+    def add(self, ids, embeddings, documents, metadatas):
+        self._documents.extend(documents)
+
+    def query(self, query_embeddings, n_results):
+        return {"documents": [self._documents[:n_results]]}
+
+
+class _FakeChromaClient:
+    def __init__(self):
+        self._collections = {}
+
+    def create_collection(self, name, metadata=None):
+        collection = _FakeCollection(name)
+        self._collections[name] = collection
+        return collection
+
+    def delete_collection(self, name):
+        self._collections.pop(name, None)
+
+
+@pytest.fixture(autouse=True)
+def _patch_chromadb_client():
+    with patch("core.rag.chromadb.Client", return_value=_FakeChromaClient()):
+        yield
+
+
 class TestChunking:
     def test_empty_text(self):
         assert _chunk_text("") == []

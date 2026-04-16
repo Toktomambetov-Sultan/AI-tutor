@@ -25,12 +25,16 @@ import pytest
 # can be imported on a dev machine without pocket_tts, grpc stubs, etc.
 # ─────────────────────────────────────────────────────────────────────
 
-if "pocket_tts" not in sys.modules:
+try:
+    import pocket_tts  # noqa: F401
+except ImportError:
     _pocket_tts = ModuleType("pocket_tts")
     _pocket_tts.TTSModel = MagicMock()
     sys.modules["pocket_tts"] = _pocket_tts
 
-if "torch" not in sys.modules:
+try:
+    import torch  # noqa: F401
+except ImportError:
     _torch = ModuleType("torch")
     _torch.is_tensor = lambda x: False
     sys.modules["torch"] = _torch
@@ -49,7 +53,9 @@ except ImportError:
     sys.modules["scipy.io"] = _scipy_io
     sys.modules["scipy.io.wavfile"] = _scipy_wavfile
 
-if "speech_recognition" not in sys.modules:
+try:
+    import speech_recognition  # noqa: F401
+except ImportError:
     _sr = ModuleType("speech_recognition")
     _sr.Recognizer = MagicMock
     sys.modules["speech_recognition"] = _sr
@@ -78,8 +84,10 @@ if not hasattr(_torch_mod, "no_grad"):
         return_value=MagicMock(__enter__=MagicMock(), __exit__=MagicMock())
     )
 
-# ── chromadb: stub if missing ──
-if "chromadb" not in sys.modules:
+# ── chromadb: stub only if truly missing ──
+try:
+    import chromadb  # noqa: F401
+except ImportError:
     _chromadb = ModuleType("chromadb")
     _chromadb.Client = MagicMock()
     sys.modules["chromadb"] = _chromadb
@@ -88,7 +96,7 @@ if "chromadb" not in sys.modules:
 # 1.  Sentence splitting
 # ─────────────────────────────────────────────────────────────────────
 
-from core.conversation import _split_sentences
+from core.conversation import _split_clauses, _split_sentences
 
 
 class TestSentenceSplitting:
@@ -140,6 +148,18 @@ class TestSentenceSplitting:
         assert result[0] == "The capital of France is Paris."
         assert result[-1] == "I can explain further."
 
+    def test_clause_splitting_breaks_long_sentence(self):
+        text = "Photosynthesis uses light energy, converts it to chemical energy, and stores it in glucose."
+        result = _split_clauses(text)
+        assert len(result) >= 2
+        assert any("light energy" in part for part in result)
+
+    def test_clause_splitting_merges_tiny_fragments(self):
+        text = "Yes, of course, we can do that."
+        result = _split_clauses(text)
+        assert len(result) == 1
+        assert result[0] == "Yes, of course, we can do that."
+
 
 # ─────────────────────────────────────────────────────────────────────
 # 2.  Interrupt handling
@@ -184,6 +204,28 @@ class TestInterruptHandling:
         assert not agent._interrupted.is_set()
         agent.handle_interrupt()
         assert agent._interrupted.is_set()
+
+    def test_handle_interrupt_drains_queue_and_sends_signal(self):
+        agent, queue, loop = self._make_agent()
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, ("ai_text", "Hello"))
+            loop.call_soon_threadsafe(queue.put_nowait, ("audio", b"123"))
+            loop.call_soon_threadsafe(queue.put_nowait, ("end", None))
+            time.sleep(0.05)
+
+            agent.handle_interrupt()
+            time.sleep(0.05)
+
+            messages = []
+
+            async def _drain():
+                while not queue.empty():
+                    messages.append(await queue.get())
+
+            loop.run_until_complete(_drain())
+            assert messages == [("signal", "interrupt")]
+        finally:
+            loop.close()
 
     def test_handle_interrupt_clears_on_new_turn(self):
         agent, _, _ = self._make_agent()
@@ -284,6 +326,16 @@ class TestTTSQueueing:
         for msg in messages[1:-1]:
             assert msg[0] == "audio"
 
+    def test_send_audio_stops_immediately_when_interrupted(self):
+        agent, queue, loop = self._make_agent()
+        try:
+            agent._interrupted.set()
+            agent._send_audio(b"\x00" * 100, ai_text="Hello!")
+            time.sleep(0.05)
+            assert queue.empty()
+        finally:
+            loop.close()
+
 
 # ─────────────────────────────────────────────────────────────────────
 # 4.  LLM streaming + sentence-chunked TTS flow
@@ -356,9 +408,13 @@ class TestStreamLLMAndSpeak:
     def test_stream_produces_sentences(self):
         agent, queue, loop, mock_openai = self._make_agent()
         try:
-            tokens = ["Hello", " world", ".", " How", " are", " you", "?"]
-            mock_stream = self._make_stream_chunks(tokens)
-            mock_openai.chat.completions.create.return_value = iter(mock_stream)
+            tokens = [
+                "Photosynthesis happens in chloroplasts.",
+                " It converts light energy into glucose?",
+            ]
+            mock_stream = MagicMock()
+            mock_stream.__iter__.return_value = iter(self._make_stream_chunks(tokens))
+            mock_openai.chat.completions.create.return_value = mock_stream
 
             # Run in a thread since it calls loop.call_soon_threadsafe
             result = [None]
@@ -377,9 +433,10 @@ class TestStreamLLMAndSpeak:
             if exc[0]:
                 raise exc[0]
             assert result[0] is not None
-            assert "Hello world." in result[0]
-            assert "How are you?" in result[0]
+            assert "Photosynthesis happens in chloroplasts." in result[0]
+            assert "It converts light energy into glucose?" in result[0]
             assert len(agent._spoken_sentences) == 2
+            mock_stream.close.assert_called_once()
         finally:
             self._cleanup(agent)
             loop.close()
@@ -389,18 +446,15 @@ class TestStreamLLMAndSpeak:
         try:
             # Three sentences worth of tokens
             tokens = [
-                "First",
-                " sentence",
-                ".",
-                " Second",
-                " sentence",
-                ".",
-                " Third",
-                " sentence",
-                ".",
+                "First sentence is definitely long enough.",
+                " ",
+                "Second sentence is also long enough.",
+                " ",
+                "Third sentence is also long enough.",
             ]
-            mock_stream = self._make_stream_chunks(tokens)
-            mock_openai.chat.completions.create.return_value = iter(mock_stream)
+            mock_stream = MagicMock()
+            mock_stream.__iter__.return_value = iter(self._make_stream_chunks(tokens))
+            mock_openai.chat.completions.create.return_value = mock_stream
 
             # Inject interrupt during the first TTS call — this simulates the
             # student starting to speak while the first sentence is being synthesised.
@@ -434,12 +488,63 @@ class TestStreamLLMAndSpeak:
             if exc[0]:
                 raise exc[0]
             assert result[0] is not None
-            # The interrupt fires during TTS of sentence 1.  The loop checks
-            # _interrupted AFTER the TTS + send, so sentence 1 goes through,
-            # then the break fires.  Sentence 2 and 3 should NOT be spoken.
             assert (
                 len(agent._spoken_sentences) == 1
             ), f"Expected 1 spoken sentence, got {agent._spoken_sentences}"
+            assert result[0] == "First sentence is definitely long enough."
+            mock_stream.close.assert_called_once()
+        finally:
+            self._cleanup(agent)
+            loop.close()
+
+    def test_interrupted_reply_only_keeps_spoken_text_in_context(self):
+        agent, queue, loop, mock_openai = self._make_agent()
+        try:
+            agent._lesson_ready = False
+            agent._transcribe = MagicMock(return_value="What did you say?")
+            agent._stream_llm_and_speak = MagicMock(
+                return_value="Actually spoken part."
+            )
+            agent._spoken_sentences = ["Actually spoken part."]
+            agent._current_ai_text = "Actually spoken part. Unspoken remainder."
+            agent._interrupted.set()
+
+            agent._handle_turn(b"\x00" * 32000)
+
+            assert agent.messages[-1] == {
+                "role": "assistant",
+                "content": "Actually spoken part.",
+            }
+            system_msgs = [
+                msg["content"]
+                for msg in agent.messages
+                if msg["role"] == "system" and "interrupted" in msg["content"].lower()
+            ]
+            assert system_msgs
+            assert "Actually spoken part." in system_msgs[-1]
+            assert "Unspoken remainder." in system_msgs[-1]
+        finally:
+            self._cleanup(agent)
+            loop.close()
+
+    def test_pending_utterance_is_processed_after_interrupt(self):
+        agent, queue, loop, mock_openai = self._make_agent()
+        try:
+            pending = b"pending-pcm"
+            agent._processing = True
+            agent._handle_turn = MagicMock()
+
+            agent._on_utterance_detected(pending)
+
+            assert agent._pending_utterance == pending
+            assert agent._interrupted.is_set()
+
+            with agent._processing_lock:
+                agent._processing = False
+            agent._process_pending_utterance()
+            time.sleep(0.05)
+
+            agent._handle_turn.assert_called_once_with(pending)
         finally:
             self._cleanup(agent)
             loop.close()

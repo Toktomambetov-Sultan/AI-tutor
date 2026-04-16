@@ -12,3 +12,4 @@ numpy
 python-dotenv>=1.0.1
 pydub>=0.25.1
 chromadb>=1.0.0
+pytest>=8.0.0

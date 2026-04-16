@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import logging
 import os
+import queue
 import re
 import tempfile
 import threading
@@ -41,15 +42,49 @@ from core.rag import LessonRAG
 
 logger = logging.getLogger(__name__)
 
-# Regex that splits on sentence-ending punctuation while keeping the
-# punctuation attached to the sentence.
+# ─── Text splitting ──────────────────────────────────────────────────
+# _SENTENCE_RE  — canonical sentence boundaries (. ! ?)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+
+# _CLAUSE_RE — finer-grained: also splits on ; : , and em-dash so
+# that long sentences are broken into shorter TTS chunks, reducing
+# first-audio-byte latency.
+_CLAUSE_RE = re.compile(r"(?<=[.!?;:,\u2014])\s+")
+
+# Minimum character length for a clause to be spoken on its own.
+# Shorter fragments are accumulated into the next clause.
+_MIN_CLAUSE_LEN = 20
 
 
 def _split_sentences(text: str) -> list[str]:
     """Split *text* into sentences at . ! ? boundaries."""
     parts = _SENTENCE_RE.split(text.strip())
     return [p.strip() for p in parts if p.strip()]
+
+
+def _split_clauses(text: str) -> list[str]:
+    """Split *text* at clause boundaries (. ! ? ; : , —).
+
+    Very short fragments are merged with the following clause so the
+    TTS model receives meaningful input.
+    """
+    raw = _CLAUSE_RE.split(text.strip())
+    merged: list[str] = []
+    buf = ""
+    for part in raw:
+        part = part.strip()
+        if not part:
+            continue
+        buf = f"{buf} {part}".strip() if buf else part
+        if len(buf) >= _MIN_CLAUSE_LEN:
+            merged.append(buf)
+            buf = ""
+    if buf:
+        if merged:
+            merged[-1] = f"{merged[-1]} {buf}"
+        else:
+            merged.append(buf)
+    return merged
 
 
 class ConversationalAgent:
@@ -102,6 +137,8 @@ class ConversationalAgent:
 
         # ── Session state ──
         self._processing = False
+        self._processing_lock = threading.Lock()
+        self._pending_utterance: bytes | None = None  # queued when user interrupts
         self._first_turn = True
         self._processor = RealtimeAudioProcessor(
             on_utterance=self._on_utterance_detected,
@@ -119,9 +156,29 @@ class ConversationalAgent:
         self._processor.feed(chunk_bytes)
 
     def handle_interrupt(self):
-        """Called when the student starts speaking while AI is talking."""
+        """Called when the student starts speaking while AI is talking.
+
+        Sets the interrupt flag, drains any queued audio so the client
+        stops hearing stale speech, and sends an explicit ``interrupt``
+        signal so the frontend can halt playback immediately.
+        """
         self._interrupted.set()
-        logger.info("Interrupt flag set — TTS will stop after current sentence")
+
+        def _drain_and_signal():
+            drained = 0
+            while not self.response_queue.empty():
+                try:
+                    self.response_queue.get_nowait()
+                    drained += 1
+                except Exception:
+                    break
+            self.response_queue.put_nowait(("signal", "interrupt"))
+            logger.info(
+                "Interrupt flag set — drained %d queued messages, sent interrupt signal",
+                drained,
+            )
+
+        self.loop.call_soon_threadsafe(_drain_and_signal)
 
     def close(self):
         """Clean up ffmpeg and RAG resources."""
@@ -254,7 +311,14 @@ class ConversationalAgent:
         return buf.getvalue()
 
     def _send_audio(self, wav_bytes: bytes, ai_text: str = ""):
-        """Queue WAV audio + metadata for the gRPC servicer to stream."""
+        """Queue WAV audio + metadata for the gRPC servicer to stream.
+
+        Checks the interrupt flag between chunks so that a barge-in
+        stops audio delivery as fast as possible.
+        """
+        if self._interrupted.is_set():
+            return
+
         # Send the text label first so the servicer can attach it
         if ai_text:
             self.loop.call_soon_threadsafe(
@@ -263,6 +327,9 @@ class ConversationalAgent:
 
         chunk_size = 32768
         for i in range(0, len(wav_bytes), chunk_size):
+            if self._interrupted.is_set():
+                logger.info("_send_audio: interrupt detected, stopping chunk delivery")
+                return
             self.loop.call_soon_threadsafe(
                 self.response_queue.put_nowait,
                 ("audio", wav_bytes[i : i + chunk_size]),
@@ -274,9 +341,15 @@ class ConversationalAgent:
     # ────────────────────────────────────────────────────────────
 
     def _stream_llm_and_speak(self, extra_system_msg: str = ""):
-        """Stream the LLM response, split by sentence, and TTS each one.
+        """Stream the LLM response, split into clauses, and TTS each one.
 
-        Returns the full reply text (may be truncated if interrupted).
+        Uses a **producer / consumer** pattern: the main thread streams
+        LLM tokens and pushes complete clauses into a queue; a worker
+        thread synthesises and sends TTS audio in parallel.  This
+        overlaps LLM generation with TTS, reducing perceived latency.
+
+        Returns the *spoken* reply text (truncated at the interrupt
+        point when the student barges in).
         """
         if extra_system_msg:
             self.messages.append({"role": "system", "content": extra_system_msg})
@@ -285,56 +358,84 @@ class ConversationalAgent:
         self._spoken_sentences = []
         self._current_ai_text = ""
 
-        # ── Stream LLM tokens ──
+        # ── TTS worker (consumer) ──
+        sentence_q: queue.Queue[str | None] = queue.Queue()
+
+        def _tts_worker():
+            """Consume clauses from *sentence_q* and synthesise + send."""
+            while True:
+                clause = sentence_q.get()
+                if clause is None:  # poison pill
+                    break
+                if self._interrupted.is_set():
+                    break
+                logger.info("TTS clause: %s", clause)
+                wav = self._synthesise_sentence(clause)
+                self._send_audio(wav, ai_text=clause)
+                self._spoken_sentences.append(clause)
+
+        worker = threading.Thread(target=_tts_worker, daemon=True)
+        worker.start()
+
+        # ── Stream LLM tokens (producer) ──
         stream = self._openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=self.messages,
             stream=True,
         )
 
-        buffer = ""  # accumulates tokens until a sentence boundary
+        buffer = ""  # accumulates tokens until a clause boundary
         full_reply = ""  # everything the LLM produced
 
-        for chunk in stream:
-            delta = chunk.choices[0].delta
-            if not delta.content:
-                continue
-
-            token = delta.content
-            buffer += token
-            full_reply += token
-
-            # Try to extract complete sentences from the buffer
-            sentences = _split_sentences(buffer)
-
-            if len(sentences) > 1:
-                # All but the last are complete sentences
-                for sent in sentences[:-1]:
-                    if self._interrupted.is_set():
-                        logger.info("Interrupted — stopping TTS mid-stream")
-                        break
-
-                    logger.info("TTS sentence: %s", sent)
-                    wav = self._synthesise_sentence(sent)
-                    self._send_audio(wav, ai_text=sent)
-                    self._spoken_sentences.append(sent)
-
+        try:
+            for chunk in stream:
                 if self._interrupted.is_set():
                     break
 
-                # Keep the incomplete tail
-                buffer = sentences[-1]
-            # else: not enough for a split yet — keep accumulating
+                delta = chunk.choices[0].delta
+                if not delta.content:
+                    continue
 
-        # ── Flush remaining buffer (last sentence) ──
+                token = delta.content
+                buffer += token
+                full_reply += token
+
+                # Try to extract complete clauses from the buffer
+                clauses = _split_clauses(buffer)
+
+                if len(clauses) > 1:
+                    for cl in clauses[:-1]:
+                        if self._interrupted.is_set():
+                            break
+                        sentence_q.put(cl)
+
+                    if self._interrupted.is_set():
+                        break
+
+                    # Keep the incomplete tail
+                    buffer = clauses[-1]
+        finally:
+            # Close the LLM stream immediately on interrupt (P1) to
+            # stop wasting tokens / network.
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+        # ── Flush remaining buffer (last clause) ──
         if buffer.strip() and not self._interrupted.is_set():
-            logger.info("TTS sentence (final): %s", buffer.strip())
-            wav = self._synthesise_sentence(buffer.strip())
-            self._send_audio(wav, ai_text=buffer.strip())
-            self._spoken_sentences.append(buffer.strip())
+            sentence_q.put(buffer.strip())
+
+        # Poison-pill to shut down the worker
+        sentence_q.put(None)
+        worker.join(timeout=30)
 
         self._current_ai_text = full_reply
-        return full_reply
+
+        # Return the text that was *actually spoken* to the student.
+        # When interrupted, this is only the spoken prefix.
+        spoken_text = " ".join(self._spoken_sentences)
+        return spoken_text if self._interrupted.is_set() else full_reply
 
     # ────────────────────────────────────────────────────────────
     # Opening greeting
@@ -345,6 +446,9 @@ class ConversationalAgent:
             return
         self._processing = True
         try:
+            self._interrupted.clear()
+            self._spoken_sentences = []
+
             greeting_messages = [
                 {"role": "system", "content": self.context},
                 {"role": "user", "content": OPENING_GREETING_INSTRUCTION},
@@ -355,33 +459,60 @@ class ConversationalAgent:
             greeting = response.choices[0].message.content
             logger.info("Opening greeting: %s", greeting)
 
-            self.messages.append({"role": "assistant", "content": greeting})
-
-            # Speak sentence by sentence
-            for sent in _split_sentences(greeting):
+            # Speak clause by clause (uses _send_audio which checks interrupt)
+            for clause in _split_clauses(greeting):
                 if self._interrupted.is_set():
                     break
-                wav = self._synthesise_sentence(sent)
-                self._send_audio(wav, ai_text=sent)
-                self._spoken_sentences.append(sent)
+                wav = self._synthesise_sentence(clause)
+                self._send_audio(wav, ai_text=clause)
+                self._spoken_sentences.append(clause)
+
+            # Only store the portion that was actually spoken
+            spoken = (
+                " ".join(self._spoken_sentences) if self._spoken_sentences else greeting
+            )
+            self.messages.append({"role": "assistant", "content": spoken})
 
         except Exception as e:
             logger.error("Error sending opening greeting: %s", e, exc_info=True)
         finally:
             self._processing = False
+            # Check if there's a pending utterance from an interrupt
+            self._process_pending_utterance()
 
     # ────────────────────────────────────────────────────────────
     # Turn handling
     # ────────────────────────────────────────────────────────────
 
     def _on_utterance_detected(self, pcm_data: bytes):
-        if self._processing:
-            logger.info("Still processing previous turn, skipping utterance")
-            return
-        self._processing = True
+        with self._processing_lock:
+            if self._processing:
+                # User spoke while AI is still responding — trigger interrupt
+                # and queue this utterance so it's processed once the current
+                # turn finishes.
+                logger.info(
+                    "User spoke during AI turn — triggering interrupt, "
+                    "queuing utterance (%d bytes)",
+                    len(pcm_data),
+                )
+                self._pending_utterance = pcm_data
+                self.handle_interrupt()
+                return
+            self._processing = True
+
         threading.Thread(
             target=self._handle_turn, args=(pcm_data,), daemon=True
         ).start()
+
+    def _process_pending_utterance(self):
+        """If a student utterance arrived during the previous AI turn,
+        process it now."""
+        pcm = self._pending_utterance
+        self._pending_utterance = None
+        if pcm is not None:
+            logger.info("Processing pending interrupt utterance (%d bytes)", len(pcm))
+            # Reset processing flag so _on_utterance_detected can acquire it
+            self._on_utterance_detected(pcm)
 
     def _handle_turn(self, pcm_data: bytes):
         try:
@@ -421,9 +552,12 @@ class ConversationalAgent:
 
             self.messages.append({"role": "user", "content": text})
 
-            full_reply = self._stream_llm_and_speak()
-            logger.info("AI Reply: %s", full_reply[:200])
-            self.messages.append({"role": "assistant", "content": full_reply})
+            spoken_reply = self._stream_llm_and_speak()
+            logger.info("AI Reply (spoken): %s", spoken_reply[:200])
+
+            # Only store the portion the student actually heard.
+            # If interrupted, spoken_reply is the truncated prefix.
+            self.messages.append({"role": "assistant", "content": spoken_reply})
 
             # ── Compress older history if it's getting long ──
             self._compress_history()
@@ -431,4 +565,7 @@ class ConversationalAgent:
         except Exception as e:
             logger.error("Error in conversation turn: %s", e, exc_info=True)
         finally:
-            self._processing = False
+            with self._processing_lock:
+                self._processing = False
+            # If the student spoke while we were busy, handle it now
+            self._process_pending_utterance()

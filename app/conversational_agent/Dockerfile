@@ -61,6 +61,8 @@ COPY --from=builder /app/proto/ proto/
 # large site-packages cache layer above)
 COPY core/ core/
 COPY server.py ./
+COPY pyproject.toml ./
+COPY __tests__/ __tests__/
 
 RUN mkdir -p /data/audio
 

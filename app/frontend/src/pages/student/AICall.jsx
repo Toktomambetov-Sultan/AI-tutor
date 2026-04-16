@@ -235,6 +235,17 @@ export default function AICall() {
                             // NOW start the MediaRecorder
                             _startRecording(stream, ws);
                         }
+                        if (msg.signal === 'interrupt') {
+                            if (currentAudioRef.current) {
+                                currentAudioRef.current.pause();
+                                currentAudioRef.current = null;
+                            }
+                            audioQueueRef.current = [];
+                            isPlayingRef.current = false;
+                            pendingAiTextRef.current = '';
+                            setTurn(TURN.STUDENT);
+                            setAiText('');
+                        }
                         if (msg.ai_text) {
                             pendingAiTextRef.current = msg.ai_text;
                         }
