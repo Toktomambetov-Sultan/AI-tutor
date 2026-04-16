@@ -19,6 +19,8 @@ RUN python -m grpc_tools.protoc \
     proto/audio.proto
 
 RUN mkdir -p /app/uploads
+# Strip Windows CRLF line endings so the shebang works on Linux
+RUN sed -i 's/\r$//' /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 EXPOSE 8000
