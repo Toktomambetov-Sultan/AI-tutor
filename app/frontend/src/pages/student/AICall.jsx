@@ -236,9 +236,25 @@ export default function AICall() {
                             _startRecording(stream, ws);
                         }
                         if (msg.signal === 'interrupt') {
-                            if (currentAudioRef.current) {
-                                currentAudioRef.current.pause();
-                                currentAudioRef.current = null;
+                            // Fade out instead of hard-pausing to avoid mid-word cutoff
+                            const interruptAudio = currentAudioRef.current;
+                            if (interruptAudio && !interruptAudio.paused) {
+                                const startVol = interruptAudio.volume;
+                                const steps = 8;
+                                const stepMs = DUCK_DURATION_MS / steps;
+                                let step = 0;
+                                const fade = setInterval(() => {
+                                    step++;
+                                    interruptAudio.volume = Math.max(0, startVol * (1 - step / steps));
+                                    if (step >= steps) {
+                                        clearInterval(fade);
+                                        interruptAudio.pause();
+                                        interruptAudio.volume = startVol;
+                                        if (currentAudioRef.current === interruptAudio) {
+                                            currentAudioRef.current = null;
+                                        }
+                                    }
+                                }, stepMs);
                             }
                             audioQueueRef.current = [];
                             isPlayingRef.current = false;

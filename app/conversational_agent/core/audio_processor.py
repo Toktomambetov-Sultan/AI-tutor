@@ -71,9 +71,9 @@ class RealtimeAudioProcessor:
         self,
         on_utterance: "callable",
         sample_rate: int = TARGET_SAMPLE_RATE,
-        silence_sec: float = 1.5,
-        min_silence_sec: float = 1.0,
-        max_silence_sec: float = 2.5,
+        silence_sec: float = 1.0,
+        min_silence_sec: float = 0.5,
+        max_silence_sec: float = 1.2,
         vad_threshold: float = 0.45,
         min_speech_sec: float = 0.5,
     ):

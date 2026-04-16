@@ -53,7 +53,7 @@ _CLAUSE_RE = re.compile(r"(?<=[.!?;:,\u2014])\s+")
 
 # Minimum character length for a clause to be spoken on its own.
 # Shorter fragments are accumulated into the next clause.
-_MIN_CLAUSE_LEN = 20
+_MIN_CLAUSE_LEN = 12
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -87,6 +87,21 @@ def _split_clauses(text: str) -> list[str]:
     return merged
 
 
+# ─── Language detection ──────────────────────────────────────────────
+_CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+
+
+def _detect_language(text: str) -> str:
+    """Return ``'ru'`` if *text* is predominantly Cyrillic, else ``'en'``."""
+    if not text:
+        return "en"
+    alpha_chars = [c for c in text if c.isalpha()]
+    if not alpha_chars:
+        return "en"
+    cyrillic_count = len(_CYRILLIC_RE.findall(text))
+    return "ru" if cyrillic_count > len(alpha_chars) / 2 else "en"
+
+
 class ConversationalAgent:
     """Per-session agent.  Receives pre-loaded shared resources to avoid
     re-loading the TTS model on every call."""
@@ -94,6 +109,9 @@ class ConversationalAgent:
     # ── class-level shared resources (loaded once) ──
     _tts_model = None
     _voice_state = None
+    _ru_tts_model = None
+    _ru_speaker: str | None = None
+    _ru_sample_rate: int | None = None
     _recognizer = None
     _openai_client: OpenAI | None = None
 
@@ -107,6 +125,23 @@ class ConversationalAgent:
         cls._tts_model = TTSModel.load_model()
         cls._voice_state = cls._tts_model.get_state_for_audio_prompt("alba")
         logger.info("TTS model loaded.")
+
+        logger.info("Loading Russian TTS model \u2026")
+        try:
+            ru_model, _ = torch.hub.load(
+                repo_or_dir="snakers4/silero-models",
+                model="silero_tts",
+                language="ru",
+                speaker="v3_1_ru",
+                trust_repo=True,
+            )
+            cls._ru_tts_model = ru_model
+            cls._ru_speaker = "baya"
+            cls._ru_sample_rate = 24000
+            logger.info("Russian TTS model loaded.")
+        except Exception as e:
+            logger.warning("Failed to load Russian TTS model: %s", e)
+            cls._ru_tts_model = None
 
         cls._recognizer = Recognizer()
         logger.info("All shared resources loaded.")
@@ -271,23 +306,78 @@ class ConversationalAgent:
     # ────────────────────────────────────────────────────────────
 
     def _transcribe(self, pcm_data: bytes) -> str:
-        """Transcribe raw 16 kHz mono PCM using OpenAI Whisper API."""
-        import numpy as np
+        """Transcribe raw 16 kHz mono PCM using OpenAI Whisper API.
 
-        # Convert PCM bytes → WAV in memory for the API
+        Speed optimisations:
+          - Trim leading/trailing silence so Whisper processes less audio.
+          - Encode as OGG/Opus (~10× smaller than WAV) for faster upload.
+          - Use ``response_format="text"`` to skip JSON overhead.
+        """
+        import numpy as np
+        import subprocess as _sp
+
         samples = np.frombuffer(pcm_data, dtype=np.int16)
-        buf = io.BytesIO()
-        scipy.io.wavfile.write(buf, TARGET_SAMPLE_RATE, samples)
-        buf.seek(0)
-        buf.name = "speech.wav"  # API needs a filename hint
+
+        # ── Trim silence (threshold: ~1 % of int16 range) ──
+        threshold = 500
+        above = np.nonzero(np.abs(samples) > threshold)[0]
+        if len(above) == 0:
+            logger.info("Whisper STT: audio is silence, skipping")
+            return ""
+        # Keep a small margin (160 samples = 10 ms @ 16 kHz)
+        margin = 160
+        start = max(0, above[0] - margin)
+        end = min(len(samples), above[-1] + margin)
+        samples = samples[start:end]
+
+        # ── Encode to OGG/Opus via ffmpeg (in-memory) ──
+        wav_buf = io.BytesIO()
+        scipy.io.wavfile.write(wav_buf, TARGET_SAMPLE_RATE, samples)
+        wav_bytes = wav_buf.getvalue()
+
+        try:
+            proc = _sp.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "wav",
+                    "-i",
+                    "pipe:0",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "32k",
+                    "-f",
+                    "ogg",
+                    "pipe:1",
+                ],
+                input=wav_bytes,
+                capture_output=True,
+                timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                upload_buf = io.BytesIO(proc.stdout)
+                upload_buf.name = "speech.ogg"
+            else:
+                # Fallback to WAV if ffmpeg encoding fails
+                logger.warning("OGG encoding failed, falling back to WAV")
+                upload_buf = io.BytesIO(wav_bytes)
+                upload_buf.name = "speech.wav"
+        except Exception:
+            upload_buf = io.BytesIO(wav_bytes)
+            upload_buf.name = "speech.wav"
 
         try:
             result = self._openai_client.audio.transcriptions.create(
                 model="whisper-1",
-                file=buf,
-                language="en",
+                file=upload_buf,
+                response_format="text",
             )
-            text = result.text.strip()
+            # With response_format="text", result is a plain string
+            text = result.strip() if isinstance(result, str) else result.text.strip()
             logger.info("Whisper STT: %s", text)
             return text
         except Exception as e:
@@ -299,22 +389,34 @@ class ConversationalAgent:
     # ────────────────────────────────────────────────────────────
 
     def _synthesise_sentence(self, sentence: str) -> bytes:
-        """Return WAV bytes for a single sentence."""
-        audio_tensor = self._tts_model.generate_audio(self._voice_state, sentence)
+        """Return WAV bytes for a single sentence (English or Russian)."""
+        lang = _detect_language(sentence)
+        if lang == "ru" and self._ru_tts_model is not None:
+            audio_tensor = self._ru_tts_model.apply_tts(
+                text=sentence,
+                speaker=self._ru_speaker,
+                sample_rate=self._ru_sample_rate,
+            )
+            sample_rate = self._ru_sample_rate
+        else:
+            audio_tensor = self._tts_model.generate_audio(self._voice_state, sentence)
+            sample_rate = self._tts_model.sample_rate
+
         buf = io.BytesIO()
         audio_np = (
             audio_tensor.cpu().numpy()
             if torch.is_tensor(audio_tensor)
             else audio_tensor
         )
-        scipy.io.wavfile.write(buf, self._tts_model.sample_rate, audio_np)
+        scipy.io.wavfile.write(buf, sample_rate, audio_np)
         return buf.getvalue()
 
     def _send_audio(self, wav_bytes: bytes, ai_text: str = ""):
         """Queue WAV audio + metadata for the gRPC servicer to stream.
 
-        Checks the interrupt flag between chunks so that a barge-in
-        stops audio delivery as fast as possible.
+        Delivers the complete sentence audio to avoid cutting off
+        mid-word.  The interrupt flag is checked only before starting
+        a new sentence — the frontend handles smooth fade-out.
         """
         if self._interrupted.is_set():
             return
@@ -327,9 +429,6 @@ class ConversationalAgent:
 
         chunk_size = 32768
         for i in range(0, len(wav_bytes), chunk_size):
-            if self._interrupted.is_set():
-                logger.info("_send_audio: interrupt detected, stopping chunk delivery")
-                return
             self.loop.call_soon_threadsafe(
                 self.response_queue.put_nowait,
                 ("audio", wav_bytes[i : i + chunk_size]),
@@ -453,23 +552,56 @@ class ConversationalAgent:
                 {"role": "system", "content": self.context},
                 {"role": "user", "content": OPENING_GREETING_INSTRUCTION},
             ]
-            response = self._openai_client.chat.completions.create(
-                model="gpt-4o-mini", messages=greeting_messages
-            )
-            greeting = response.choices[0].message.content
-            logger.info("Opening greeting: %s", greeting)
 
-            # Speak clause by clause (uses _send_audio which checks interrupt)
-            for clause in _split_clauses(greeting):
-                if self._interrupted.is_set():
-                    break
-                wav = self._synthesise_sentence(clause)
-                self._send_audio(wav, ai_text=clause)
-                self._spoken_sentences.append(clause)
+            # Stream the greeting so the first clause is spoken sooner.
+            stream = self._openai_client.chat.completions.create(
+                model="gpt-4o-mini", messages=greeting_messages, stream=True
+            )
+
+            buffer = ""
+            full_greeting = ""
+
+            try:
+                for chunk in stream:
+                    if self._interrupted.is_set():
+                        break
+                    delta = chunk.choices[0].delta
+                    if not delta.content:
+                        continue
+                    token = delta.content
+                    buffer += token
+                    full_greeting += token
+
+                    clauses = _split_clauses(buffer)
+                    if len(clauses) > 1:
+                        for cl in clauses[:-1]:
+                            if self._interrupted.is_set():
+                                break
+                            wav = self._synthesise_sentence(cl)
+                            self._send_audio(wav, ai_text=cl)
+                            self._spoken_sentences.append(cl)
+                        if self._interrupted.is_set():
+                            break
+                        buffer = clauses[-1]
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+            # Flush remaining buffer
+            if buffer.strip() and not self._interrupted.is_set():
+                wav = self._synthesise_sentence(buffer.strip())
+                self._send_audio(wav, ai_text=buffer.strip())
+                self._spoken_sentences.append(buffer.strip())
+
+            logger.info("Opening greeting: %s", full_greeting[:200])
 
             # Only store the portion that was actually spoken
             spoken = (
-                " ".join(self._spoken_sentences) if self._spoken_sentences else greeting
+                " ".join(self._spoken_sentences)
+                if self._spoken_sentences
+                else full_greeting
             )
             self.messages.append({"role": "assistant", "content": spoken})
 
