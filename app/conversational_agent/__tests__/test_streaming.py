@@ -1152,8 +1152,8 @@ class TestReducedVADThresholds:
 
         sig = inspect.signature(RealtimeAudioProcessor.__init__)
         assert sig.parameters["silence_sec"].default == 1.0
-        assert sig.parameters["min_silence_sec"].default == 0.7
-        assert sig.parameters["max_silence_sec"].default == 1.8
+        assert sig.parameters["min_silence_sec"].default == 0.5
+        assert sig.parameters["max_silence_sec"].default == 1.2
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1348,3 +1348,216 @@ class TestRussianTTSIntegration:
         )
         # Should generate at least ~2 seconds of audio at 24kHz
         assert audio.shape[0] > self.sample_rate * 2
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 15. on_speech_paused callback in RealtimeAudioProcessor
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestOnSpeechPausedCallback:
+    """Verify that the VAD fires on_speech_paused at the first silence
+    frame after speech, and that it passes the PCM buffer."""
+
+    def test_init_accepts_on_speech_paused(self):
+        """on_speech_paused parameter is accepted and stored."""
+        import inspect
+        from core.audio_processor import RealtimeAudioProcessor
+
+        sig = inspect.signature(RealtimeAudioProcessor.__init__)
+        assert "on_speech_paused" in sig.parameters
+        assert sig.parameters["on_speech_paused"].default is None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 16. Eager STT — transcribe during silence detection
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestEagerSTT:
+    """Test the eager STT optimisation that starts Whisper transcription
+    at the first silence frame, overlapping with the silence-detection
+    wait."""
+
+    def _make_agent(self):
+        from core.conversation import ConversationalAgent
+
+        mock_openai = MagicMock()
+        mock_tts = MagicMock()
+        mock_tts.sample_rate = 22050
+
+        orig_tts = ConversationalAgent._tts_model
+        orig_vs = ConversationalAgent._voice_state
+        orig_rec = ConversationalAgent._recognizer
+        orig_client = ConversationalAgent._openai_client
+
+        ConversationalAgent._tts_model = mock_tts
+        ConversationalAgent._voice_state = MagicMock()
+        ConversationalAgent._recognizer = MagicMock()
+        ConversationalAgent._openai_client = mock_openai
+
+        with patch("core.conversation.RealtimeAudioProcessor"), patch(
+            "core.conversation.LessonRAG"
+        ) as mock_rag:
+            mock_rag_inst = MagicMock()
+            mock_rag.return_value = mock_rag_inst
+            mock_rag_inst.ingest = MagicMock()
+            mock_rag_inst.build_system_prompt = MagicMock(return_value="sys")
+            mock_rag_inst.chunk_count = 0
+            mock_rag_inst.lesson_title = "T"
+
+            loop = asyncio.new_event_loop()
+            q = asyncio.Queue()
+            agent = ConversationalAgent(q, loop)
+
+        agent._orig = (orig_tts, orig_vs, orig_rec, orig_client)
+        return agent, mock_openai
+
+    def _cleanup(self, agent):
+        from core.conversation import ConversationalAgent
+
+        orig_tts, orig_vs, orig_rec, orig_client = agent._orig
+        ConversationalAgent._tts_model = orig_tts
+        ConversationalAgent._voice_state = orig_vs
+        ConversationalAgent._recognizer = orig_rec
+        ConversationalAgent._openai_client = orig_client
+
+    def test_eager_state_initialised(self):
+        """Agent should initialise eager STT state vars."""
+        agent, _ = self._make_agent()
+        try:
+            assert agent._eager_stt_result is None
+            assert agent._eager_stt_pcm_len == 0
+            assert not agent._eager_stt_done.is_set()
+        finally:
+            self._cleanup(agent)
+
+    def test_on_speech_paused_starts_background_transcription(self):
+        """_on_speech_paused should kick off a background Whisper call."""
+        agent, mock_openai = self._make_agent()
+        try:
+            mock_openai.audio.transcriptions.create.return_value = "Hello world"
+
+            import numpy as np
+
+            t = np.linspace(0, 1, 16000, dtype=np.float64)
+            pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
+
+            agent._on_speech_paused(pcm)
+
+            # Wait for the background thread to finish
+            assert agent._eager_stt_done.wait(timeout=5.0)
+
+            with agent._eager_stt_lock:
+                assert agent._eager_stt_result == "Hello world"
+                assert agent._eager_stt_pcm_len == len(pcm)
+        finally:
+            self._cleanup(agent)
+
+    def test_get_eager_uses_cached_result(self):
+        """When eager result covers ≥70% of utterance, use it directly."""
+        agent, mock_openai = self._make_agent()
+        try:
+            # Pre-populate eager state as if background thread finished
+            pcm_data = b"\x00" * 16000
+            with agent._eager_stt_lock:
+                agent._eager_stt_result = "Eager text"
+                # Eager covered 100% of utterance
+                agent._eager_stt_pcm_len = len(pcm_data)
+            agent._eager_stt_done.set()
+
+            result = agent._get_eager_or_transcribe(pcm_data)
+            assert result == "Eager text"
+            # _transcribe should NOT have been called again
+            mock_openai.audio.transcriptions.create.assert_not_called()
+        finally:
+            self._cleanup(agent)
+
+    def test_get_eager_uses_result_at_70_percent(self):
+        """Eager result is used when it covers exactly 70% of final PCM."""
+        agent, mock_openai = self._make_agent()
+        try:
+            full_pcm = b"\x00" * 10000
+            with agent._eager_stt_lock:
+                agent._eager_stt_result = "Partial text"
+                # 70% coverage
+                agent._eager_stt_pcm_len = 7000
+            agent._eager_stt_done.set()
+
+            result = agent._get_eager_or_transcribe(full_pcm)
+            assert result == "Partial text"
+            mock_openai.audio.transcriptions.create.assert_not_called()
+        finally:
+            self._cleanup(agent)
+
+    def test_get_eager_falls_back_when_coverage_low(self):
+        """When eager result covers <70% of utterance, re-transcribe."""
+        agent, mock_openai = self._make_agent()
+        try:
+            mock_openai.audio.transcriptions.create.return_value = "Full text"
+
+            import numpy as np
+
+            t = np.linspace(0, 1, 16000, dtype=np.float64)
+            full_pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
+            with agent._eager_stt_lock:
+                agent._eager_stt_result = "Partial"
+                # Only 50% coverage — too little
+                agent._eager_stt_pcm_len = len(full_pcm) // 2
+            agent._eager_stt_done.set()
+
+            result = agent._get_eager_or_transcribe(full_pcm)
+            assert result == "Full text"
+            # _transcribe should have been called
+            mock_openai.audio.transcriptions.create.assert_called_once()
+        finally:
+            self._cleanup(agent)
+
+    def test_get_eager_falls_back_when_no_eager(self):
+        """When no eager STT was started, fall back to full transcription."""
+        agent, mock_openai = self._make_agent()
+        try:
+            mock_openai.audio.transcriptions.create.return_value = "Fresh text"
+
+            import numpy as np
+
+            t = np.linspace(0, 1, 16000, dtype=np.float64)
+            full_pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
+
+            # _eager_stt_done is NOT set — Event starts unset
+            result = agent._get_eager_or_transcribe(full_pcm)
+            assert result == "Fresh text"
+            mock_openai.audio.transcriptions.create.assert_called_once()
+        finally:
+            self._cleanup(agent)
+
+    def test_on_speech_paused_resets_previous_eager(self):
+        """A new _on_speech_paused call should discard the old result."""
+        agent, mock_openai = self._make_agent()
+        try:
+            # Simulate a completed first eager result
+            agent._eager_stt_result = "Old result"
+            agent._eager_stt_pcm_len = 5000
+            agent._eager_stt_done.set()
+
+            # Now a new pause fires — should clear old state
+            mock_openai.audio.transcriptions.create.return_value = "New result"
+
+            import numpy as np
+
+            t = np.linspace(0, 1, 16000, dtype=np.float64)
+            pcm = (np.sin(2 * np.pi * 440 * t) * 10000).astype(np.int16).tobytes()
+
+            agent._on_speech_paused(pcm)
+
+            # Immediately after calling, the old result should be cleared
+            with agent._eager_stt_lock:
+                assert agent._eager_stt_result is None
+
+            # Wait for the new background call to finish
+            assert agent._eager_stt_done.wait(timeout=5.0)
+
+            with agent._eager_stt_lock:
+                assert agent._eager_stt_result == "New result"
+        finally:
+            self._cleanup(agent)

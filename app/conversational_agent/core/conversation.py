@@ -175,8 +175,18 @@ class ConversationalAgent:
         self._processing_lock = threading.Lock()
         self._pending_utterance: bytes | None = None  # queued when user interrupts
         self._first_turn = True
+
+        # ── Eager STT — start transcribing while silence is still
+        #    being measured so that the text is ready by the time the
+        #    utterance boundary fires. ──
+        self._eager_stt_result: str | None = None
+        self._eager_stt_pcm_len: int = 0
+        self._eager_stt_done = threading.Event()
+        self._eager_stt_lock = threading.Lock()
+
         self._processor = RealtimeAudioProcessor(
             on_utterance=self._on_utterance_detected,
+            on_speech_paused=self._on_speech_paused,
         )
 
     # ────────────────────────────────────────────────────────────
@@ -219,6 +229,59 @@ class ConversationalAgent:
         """Clean up ffmpeg and RAG resources."""
         self._processor.close()
         self.rag.close()
+
+    # ────────────────────────────────────────────────────────────
+    # Eager STT — transcribe during silence detection
+    # ────────────────────────────────────────────────────────────
+
+    def _on_speech_paused(self, pcm_data: bytes):
+        """Called by VAD at the first silence frame after speech.
+
+        Kicks off a background Whisper API call so that the
+        transcription overlaps with the remaining silence-detection
+        wait (~0.5-1 s).  When the full utterance boundary fires,
+        ``_handle_turn`` checks whether the eager result is already
+        available and skips a second Whisper call.
+        """
+        with self._eager_stt_lock:
+            self._eager_stt_result = None
+            self._eager_stt_pcm_len = len(pcm_data)
+            self._eager_stt_done.clear()
+
+        def _background():
+            text = self._transcribe(pcm_data)
+            with self._eager_stt_lock:
+                self._eager_stt_result = text
+                self._eager_stt_pcm_len = len(pcm_data)
+            self._eager_stt_done.set()
+            logger.info("Eager STT finished: %s", text[:120] if text else "(empty)")
+
+        threading.Thread(target=_background, daemon=True).start()
+
+    def _get_eager_or_transcribe(self, pcm_data: bytes) -> str:
+        """Return transcription text, preferring the eager result.
+
+        If the eager background transcription already finished (or
+        finishes within a short wait) and it covered at least 70 % of
+        the final utterance length, use that result directly — saving
+        a full Whisper round-trip.  Otherwise fall back to a fresh
+        ``_transcribe`` call.
+        """
+        # Wait briefly — the eager call started ~silence_sec ago, so
+        # it should be nearly done (or already done).
+        if self._eager_stt_done.wait(timeout=2.0):
+            with self._eager_stt_lock:
+                # Use if the eager audio is ≥ 70 % of the final PCM
+                if self._eager_stt_pcm_len >= len(pcm_data) * 0.7:
+                    text = self._eager_stt_result or ""
+                    logger.info(
+                        "Using eager STT result (covered %.0f%% of utterance)",
+                        self._eager_stt_pcm_len / len(pcm_data) * 100,
+                    )
+                    return text
+
+        logger.info("Eager STT miss — running full transcription")
+        return self._transcribe(pcm_data)
 
     # ────────────────────────────────────────────────────────────
     # Conversation history compression
@@ -651,8 +714,8 @@ class ConversationalAgent:
             duration = len(pcm_data) / (TARGET_SAMPLE_RATE * BYTES_PER_SAMPLE)
             logger.info("Processing speech turn (%.1fs of PCM) ...", duration)
 
-            # ── 1. STT (Whisper) ──
-            text = self._transcribe(pcm_data)
+            # ── 1. STT — try eager result first, fall back to fresh call ──
+            text = self._get_eager_or_transcribe(pcm_data)
             if not text or text.strip().lower() in ("quit", "exit", "stop"):
                 return
 

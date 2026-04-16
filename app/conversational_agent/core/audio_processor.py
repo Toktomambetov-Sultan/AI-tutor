@@ -76,10 +76,12 @@ class RealtimeAudioProcessor:
         max_silence_sec: float = 1.2,
         vad_threshold: float = 0.45,
         min_speech_sec: float = 0.5,
+        on_speech_paused: "callable | None" = None,
     ):
         _ensure_silero_model()
 
         self.on_utterance = on_utterance
+        self.on_speech_paused = on_speech_paused
         self.sample_rate = sample_rate
 
         # ── Adaptive silence parameters ──
@@ -283,6 +285,13 @@ class RealtimeAudioProcessor:
                             frames_read,
                             speech_prob,
                         )
+                        # Fire eager STT so transcription overlaps
+                        # with the remaining silence-detection wait.
+                        if (
+                            self.on_speech_paused
+                            and len(self._pcm_buf) >= self.min_speech_bytes
+                        ):
+                            self.on_speech_paused(bytes(self._pcm_buf))
 
                     if self._silence_frames >= silence_frames_needed:
                         pcm = bytes(self._pcm_buf)
