@@ -1,8 +1,10 @@
 """
 Per-session conversational agent.
 
-Orchestrates the full STT → RAG → LLM (streaming) → TTS pipeline for a
-single student session.
+Thin orchestrator that coordinates:
+- **LessonManager** — RAG, language detection, STT model selection
+- **SessionState** — interrupts, turn queuing, message history
+- **LLMPipeline** — LLM streaming, sentence chunking, TTS synthesis
 
 Key design:
   - **Vosk streaming STT** — audio is transcribed in real-time as the
@@ -17,202 +19,106 @@ Key design:
 from __future__ import annotations
 
 import io
-import json
 import logging
-import os
 import queue
-import re
 import threading
+from typing import Callable
 
 import scipy.io.wavfile
 import torch
 from openai import OpenAI
-from pocket_tts import TTSModel
 from vosk import KaldiRecognizer, Model as VoskModel, SetLogLevel
 
-from core.audio_processor import (
-    TARGET_SAMPLE_RATE,
-    RealtimeAudioProcessor,
-)
+from core.audio_processor import TARGET_SAMPLE_RATE, RealtimeAudioProcessor
+from core.lesson_manager import LessonManager
+from core.pipeline import LLMPipeline
 from core.prompts import (
     FALLBACK_SYSTEM_PROMPT,
-    OPENING_GREETING_INSTRUCTION,
     INTERRUPT_CONTEXT_TEMPLATE,
+    OPENING_GREETING_INSTRUCTION,
 )
+from core.protocol import MessageType, QueueMessage
 from core.rag import LessonRAG
+from core.resources import SharedResources, build_default_shared_resources
+from core.session_state import SessionState
+from core.utils import (
+    detect_language,
+    extract_text_from_lesson_context,
+    split_clauses,
+)
 
 logger = logging.getLogger(__name__)
 
 # Suppress Vosk's own logging (we log results ourselves)
 SetLogLevel(-1)
 
-# ─── Text splitting ──────────────────────────────────────────────────
-# _SENTENCE_RE  — canonical sentence boundaries (. ! ?)
-_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
-
-# _CLAUSE_RE — finer-grained: also splits on ; : , and em-dash so
-# that long sentences are broken into shorter TTS chunks, reducing
-# first-audio-byte latency.
-_CLAUSE_RE = re.compile(r"(?<=[.!?;:,\u2014])\s+")
-
-# Minimum character length for a clause to be spoken on its own.
-# Shorter fragments are accumulated into the next clause.
-_MIN_CLAUSE_LEN = 12
-
-
-def _split_sentences(text: str) -> list[str]:
-    """Split *text* into sentences at . ! ? boundaries."""
-    parts = _SENTENCE_RE.split(text.strip())
-    return [p.strip() for p in parts if p.strip()]
-
-
-def _split_clauses(text: str) -> list[str]:
-    """Split *text* at clause boundaries (. ! ? ; : , —).
-
-    Very short fragments are merged with the following clause so the
-    TTS model receives meaningful input.
-    """
-    raw = _CLAUSE_RE.split(text.strip())
-    merged: list[str] = []
-    buf = ""
-    for part in raw:
-        part = part.strip()
-        if not part:
-            continue
-        buf = f"{buf} {part}".strip() if buf else part
-        if len(buf) >= _MIN_CLAUSE_LEN:
-            merged.append(buf)
-            buf = ""
-    if buf:
-        if merged:
-            merged[-1] = f"{merged[-1]} {buf}"
-        else:
-            merged.append(buf)
-    return merged
-
-
-# ─── Language detection ──────────────────────────────────────────────
-_CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
-
-
-def _detect_language(text: str) -> str:
-    """Return ``'ru'`` if *text* is predominantly Cyrillic, else ``'en'``."""
-    if not text:
-        return "en"
-    alpha_chars = [c for c in text if c.isalpha()]
-    if not alpha_chars:
-        return "en"
-    cyrillic_count = len(_CYRILLIC_RE.findall(text))
-    return "ru" if cyrillic_count > len(alpha_chars) / 2 else "en"
-
-
-def _extract_text_from_lesson_context(lesson_context: str) -> str:
-    """Extract human-readable lesson content for accurate language detection."""
-    try:
-        ctx = json.loads(lesson_context)
-    except json.JSONDecodeError:
-        return lesson_context
-
-    parts: list[str] = []
-    if isinstance(ctx, dict):
-        lesson_title = ctx.get("lesson_title")
-        if isinstance(lesson_title, str):
-            parts.append(lesson_title)
-
-        materials = ctx.get("materials")
-        if isinstance(materials, list):
-            for mat in materials:
-                if not isinstance(mat, dict):
-                    continue
-                title = mat.get("title")
-                if isinstance(title, str):
-                    parts.append(title)
-                content = mat.get("content")
-                if isinstance(content, str):
-                    parts.append(content)
-
-    return " ".join(parts).strip() or lesson_context
-
 
 class ConversationalAgent:
     """Per-session agent.  Receives pre-loaded shared resources to avoid
     re-loading the TTS model on every call."""
 
-    # ── class-level shared resources (loaded once) ──
-    _tts_model = None
-    _voice_state = None
-    _ru_tts_model = None
-    _ru_speaker: str | None = None
-    _ru_sample_rate: int | None = None
-    _openai_client: OpenAI | None = None
-    _vosk_model_en: VoskModel | None = None
-    _vosk_model_ru: VoskModel | None = None
-
-    # ── Vosk model paths (configurable via env vars) ──
-    _VOSK_MODEL_EN = os.environ.get(
-        "VOSK_MODEL_EN", "/app/models/vosk-model-small-en-us-0.15"
-    )
-    _VOSK_MODEL_RU = os.environ.get(
-        "VOSK_MODEL_RU", "/app/models/vosk-model-small-ru-0.22"
-    )
+    # ── Process-wide shared resources (set once at startup) ──
+    _default_resources: SharedResources | None = None
 
     @classmethod
-    def load_shared_resources(cls):
-        """Call once at server startup to pre-load heavy models."""
-        cls._openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-        logger.info("OpenAI client created.")
+    def apply_shared_resources(cls, resources: SharedResources) -> None:
+        """Store process-wide shared resources for use by all new sessions."""
+        cls._default_resources = resources
 
-        logger.info("Loading TTS model (one-time) ...")
-        cls._tts_model = TTSModel.load_model()
-        cls._voice_state = cls._tts_model.get_state_for_audio_prompt("alba")
-        logger.info("TTS model loaded.")
+    @classmethod
+    def load_shared_resources(
+        cls,
+        resource_loader: Callable[[], SharedResources] | None = None,
+    ):
+        """Call once at server startup to pre-load heavy models.
 
-        logger.info("Loading Russian TTS model \u2026")
-        try:
-            ru_model, _ = torch.hub.load(
-                repo_or_dir="snakers4/silero-models",
-                model="silero_tts",
-                language="ru",
-                speaker="v3_1_ru",
-                trust_repo=True,
-            )
-            cls._ru_tts_model = ru_model
-            cls._ru_speaker = "baya"
-            cls._ru_sample_rate = 24000
-            logger.info("Russian TTS model loaded.")
-        except Exception as e:
-            logger.warning("Failed to load Russian TTS model: %s", e)
-            cls._ru_tts_model = None
-
-        # ── Vosk STT models ──
-        logger.info("Loading Vosk EN model from %s …", cls._VOSK_MODEL_EN)
-        try:
-            cls._vosk_model_en = VoskModel(cls._VOSK_MODEL_EN)
-            logger.info("Vosk EN model loaded.")
-        except Exception as e:
-            logger.warning("Failed to load Vosk EN model: %s", e)
-
-        logger.info("Loading Vosk RU model from %s …", cls._VOSK_MODEL_RU)
-        try:
-            cls._vosk_model_ru = VoskModel(cls._VOSK_MODEL_RU)
-            logger.info("Vosk RU model loaded.")
-        except Exception as e:
-            logger.warning("Failed to load Vosk RU model: %s", e)
-
+        A custom *resource_loader* enables dependency injection for tests
+        and alternative runtime bootstraps.
+        """
+        loader = resource_loader or build_default_shared_resources
+        cls.apply_shared_resources(loader())
         logger.info("All shared resources loaded.")
 
     # ────────────────────────────────────────────────────────────
     # Instance
     # ────────────────────────────────────────────────────────────
 
-    def __init__(self, response_queue, loop, lesson_context: str = ""):
+    def __init__(
+        self,
+        response_queue,
+        loop,
+        lesson_context: str = "",
+        resources: SharedResources | None = None,
+        rag_factory: Callable[[OpenAI], LessonRAG] | None = None,
+        recognizer_factory: Callable[[VoskModel, int], object] | None = None,
+        audio_processor_factory: Callable[..., RealtimeAudioProcessor] | None = None,
+    ):
         self.response_queue = response_queue
         self.loop = loop
+        self._resources = resources or self.__class__._default_resources
+        if self._resources is None:
+            raise RuntimeError(
+                "SharedResources are not configured. Call load_shared_resources() "
+                "or inject resources."
+            )
 
-        # ── RAG ──
-        self.rag = LessonRAG(self._openai_client)
+        _rag_factory = rag_factory or LessonRAG
+        _recognizer_factory = recognizer_factory or KaldiRecognizer
+        _audio_processor_factory = audio_processor_factory or RealtimeAudioProcessor
+
+        self._init_rag(_rag_factory, lesson_context)
+        self._init_session_state()
+        self._init_processor(_recognizer_factory, _audio_processor_factory)
+
+    def _init_rag(
+        self,
+        rag_factory: Callable[[OpenAI], LessonRAG],
+        lesson_context: str,
+    ):
+        """Set up RAG, lesson context, and language detection."""
+        self.rag = rag_factory(self._resources.openai_client)
         self._lesson_ready = False
-        self._language = "en"  # determined from lesson materials
+        self._language = "en"
 
         if lesson_context:
             self._init_lesson(lesson_context)
@@ -221,33 +127,37 @@ class ConversationalAgent:
 
         self.messages: list[dict] = [{"role": "system", "content": self.context}]
 
-        # ── Interrupt / barge-in state ──
+    def _init_session_state(self):
+        """Initialise per-session mutable state (interrupts, turn tracking)."""
         self._interrupted = threading.Event()
-        self._current_ai_text: str = ""  # full reply being spoken
-        self._spoken_sentences: list[str] = []  # sentences already sent as audio
+        self._current_ai_text: str = ""
+        self._spoken_sentences: list[str] = []
 
-        # ── Session state ──
         self._processing = False
         self._processing_lock = threading.Lock()
-        self._pending_utterance: str | None = None  # queued when user interrupts
+        self._pending_utterance: str | None = None
         self._first_turn = True
 
-        # ── Vosk recognizer for this session ──
+    def _init_processor(
+        self,
+        recognizer_factory: Callable[[VoskModel, int], object],
+        audio_processor_factory: Callable[..., RealtimeAudioProcessor],
+    ):
+        """Pick the correct Vosk model for the session language and build the processor."""
         vosk_model = (
-            self._vosk_model_ru
-            if self._language == "ru" and self._vosk_model_ru
-            else self._vosk_model_en
+            self._resources.vosk_model_ru
+            if self._language == "ru" and self._resources.vosk_model_ru
+            else self._resources.vosk_model_en
         )
         recognizer = (
-            KaldiRecognizer(vosk_model, TARGET_SAMPLE_RATE) if vosk_model else None
+            recognizer_factory(vosk_model, TARGET_SAMPLE_RATE) if vosk_model else None
         )
         logger.info(
             "Session language=%s, Vosk recognizer=%s",
             self._language,
             "ready" if recognizer else "unavailable",
         )
-
-        self._processor = RealtimeAudioProcessor(
+        self._processor = audio_processor_factory(
             on_utterance=self._on_utterance_detected,
             recognizer=recognizer,
         )
@@ -280,7 +190,9 @@ class ConversationalAgent:
                     drained += 1
                 except Exception:
                     break
-            self.response_queue.put_nowait(("signal", "interrupt"))
+            self.response_queue.put_nowait(
+                QueueMessage(MessageType.SIGNAL, "interrupt")
+            )
             logger.info(
                 "Interrupt flag set — drained %d queued messages, sent interrupt signal",
                 drained,
@@ -325,7 +237,7 @@ class ConversationalAgent:
             f"{m['role'].upper()}: {m['content'][:300]}" for m in middle
         )
         try:
-            resp = self._openai_client.chat.completions.create(
+            resp = self._resources.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {
@@ -365,8 +277,8 @@ class ConversationalAgent:
             self.rag.ingest(lesson_context)
             self.context = self.rag.build_system_prompt()
             self._lesson_ready = True
-            self._language = _detect_language(
-                _extract_text_from_lesson_context(lesson_context)
+            self._language = detect_language(
+                extract_text_from_lesson_context(lesson_context)
             )
             logger.info(
                 "Lesson RAG ready: %d chunks indexed for %r (language=%s)",
@@ -384,17 +296,19 @@ class ConversationalAgent:
 
     def _synthesise_sentence(self, sentence: str) -> bytes:
         """Return WAV bytes for a single sentence (English or Russian)."""
-        lang = _detect_language(sentence)
-        if lang == "ru" and self._ru_tts_model is not None:
-            audio_tensor = self._ru_tts_model.apply_tts(
+        lang = detect_language(sentence)
+        if lang == "ru" and self._resources.ru_tts_model is not None:
+            audio_tensor = self._resources.ru_tts_model.apply_tts(
                 text=sentence,
-                speaker=self._ru_speaker,
-                sample_rate=self._ru_sample_rate,
+                speaker=self._resources.ru_speaker,
+                sample_rate=self._resources.ru_sample_rate,
             )
-            sample_rate = self._ru_sample_rate
+            sample_rate = self._resources.ru_sample_rate
         else:
-            audio_tensor = self._tts_model.generate_audio(self._voice_state, sentence)
-            sample_rate = self._tts_model.sample_rate
+            audio_tensor = self._resources.tts_model.generate_audio(
+                self._resources.voice_state, sentence
+            )
+            sample_rate = self._resources.tts_model.sample_rate
 
         buf = io.BytesIO()
         audio_np = (
@@ -418,23 +332,26 @@ class ConversationalAgent:
         # Send the text label first so the servicer can attach it
         if ai_text:
             self.loop.call_soon_threadsafe(
-                self.response_queue.put_nowait, ("ai_text", ai_text)
+                self.response_queue.put_nowait,
+                QueueMessage(MessageType.AI_TEXT, ai_text),
             )
 
         chunk_size = 32768
         for i in range(0, len(wav_bytes), chunk_size):
             self.loop.call_soon_threadsafe(
                 self.response_queue.put_nowait,
-                ("audio", wav_bytes[i : i + chunk_size]),
+                QueueMessage(MessageType.AUDIO, wav_bytes[i : i + chunk_size]),
             )
-        self.loop.call_soon_threadsafe(self.response_queue.put_nowait, ("end", None))
+        self.loop.call_soon_threadsafe(
+            self.response_queue.put_nowait, QueueMessage(MessageType.END)
+        )
 
     # ────────────────────────────────────────────────────────────
     # LLM streaming + per-sentence TTS
     # ────────────────────────────────────────────────────────────
 
-    def _stream_llm_and_speak(self, extra_system_msg: str = ""):
-        """Stream the LLM response, split into clauses, and TTS each one.
+    def _stream_and_speak(self, messages: list[dict]) -> str:
+        """Stream the LLM for *messages*, split into TTS clauses, return spoken text.
 
         Uses a **producer / consumer** pattern: the main thread streams
         LLM tokens and pushes complete clauses into a queue; a worker
@@ -444,9 +361,6 @@ class ConversationalAgent:
         Returns the *spoken* reply text (truncated at the interrupt
         point when the student barges in).
         """
-        if extra_system_msg:
-            self.messages.append({"role": "system", "content": extra_system_msg})
-
         self._interrupted.clear()
         self._spoken_sentences = []
         self._current_ai_text = ""
@@ -454,26 +368,28 @@ class ConversationalAgent:
         # ── TTS worker (consumer) ──
         sentence_q: queue.Queue[str | None] = queue.Queue()
 
+        def _synthesise_and_send(clause: str):
+            """Synthesise *clause* and queue the resulting audio."""
+            logger.info("TTS clause: %s", clause)
+            wav = self._synthesise_sentence(clause)
+            self._send_audio(wav, ai_text=clause)
+            self._spoken_sentences.append(clause)
+
         def _tts_worker():
             """Consume clauses from *sentence_q* and synthesise + send."""
             while True:
                 clause = sentence_q.get()
-                if clause is None:  # poison pill
+                if clause is None or self._interrupted.is_set():
                     break
-                if self._interrupted.is_set():
-                    break
-                logger.info("TTS clause: %s", clause)
-                wav = self._synthesise_sentence(clause)
-                self._send_audio(wav, ai_text=clause)
-                self._spoken_sentences.append(clause)
+                _synthesise_and_send(clause)
 
         worker = threading.Thread(target=_tts_worker, daemon=True)
         worker.start()
 
         # ── Stream LLM tokens (producer) ──
-        stream = self._openai_client.chat.completions.create(
+        stream = self._resources.openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=self.messages,
+            messages=messages,
             stream=True,
         )
 
@@ -494,7 +410,7 @@ class ConversationalAgent:
                 full_reply += token
 
                 # Try to extract complete clauses from the buffer
-                clauses = _split_clauses(buffer)
+                clauses = split_clauses(buffer)
 
                 if len(clauses) > 1:
                     for cl in clauses[:-1]:
@@ -508,7 +424,7 @@ class ConversationalAgent:
                     # Keep the incomplete tail
                     buffer = clauses[-1]
         finally:
-            # Close the LLM stream immediately on interrupt (P1) to
+            # Close the LLM stream immediately on interrupt to
             # stop wasting tokens / network.
             try:
                 stream.close()
@@ -530,6 +446,12 @@ class ConversationalAgent:
         spoken_text = " ".join(self._spoken_sentences)
         return spoken_text if self._interrupted.is_set() else full_reply
 
+    def _stream_llm_and_speak(self, extra_system_msg: str = "") -> str:
+        """Prepare the current turn’s message list and stream LLM + TTS."""
+        if extra_system_msg:
+            self.messages.append({"role": "system", "content": extra_system_msg})
+        return self._stream_and_speak(self.messages)
+
     # ────────────────────────────────────────────────────────────
     # Opening greeting
     # ────────────────────────────────────────────────────────────
@@ -539,66 +461,13 @@ class ConversationalAgent:
             return
         self._processing = True
         try:
-            self._interrupted.clear()
-            self._spoken_sentences = []
-
             greeting_messages = [
                 {"role": "system", "content": self.context},
                 {"role": "user", "content": OPENING_GREETING_INSTRUCTION},
             ]
-
-            # Stream the greeting so the first clause is spoken sooner.
-            stream = self._openai_client.chat.completions.create(
-                model="gpt-4o-mini", messages=greeting_messages, stream=True
-            )
-
-            buffer = ""
-            full_greeting = ""
-
-            try:
-                for chunk in stream:
-                    if self._interrupted.is_set():
-                        break
-                    delta = chunk.choices[0].delta
-                    if not delta.content:
-                        continue
-                    token = delta.content
-                    buffer += token
-                    full_greeting += token
-
-                    clauses = _split_clauses(buffer)
-                    if len(clauses) > 1:
-                        for cl in clauses[:-1]:
-                            if self._interrupted.is_set():
-                                break
-                            wav = self._synthesise_sentence(cl)
-                            self._send_audio(wav, ai_text=cl)
-                            self._spoken_sentences.append(cl)
-                        if self._interrupted.is_set():
-                            break
-                        buffer = clauses[-1]
-            finally:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
-
-            # Flush remaining buffer
-            if buffer.strip() and not self._interrupted.is_set():
-                wav = self._synthesise_sentence(buffer.strip())
-                self._send_audio(wav, ai_text=buffer.strip())
-                self._spoken_sentences.append(buffer.strip())
-
-            logger.info("Opening greeting: %s", full_greeting[:200])
-
-            # Only store the portion that was actually spoken
-            spoken = (
-                " ".join(self._spoken_sentences)
-                if self._spoken_sentences
-                else full_greeting
-            )
+            spoken = self._stream_and_speak(greeting_messages)
+            logger.info("Opening greeting: %s", spoken[:200])
             self.messages.append({"role": "assistant", "content": spoken})
-
         except Exception as e:
             logger.error("Error sending opening greeting: %s", e, exc_info=True)
         finally:

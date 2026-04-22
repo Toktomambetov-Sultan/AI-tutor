@@ -98,44 +98,44 @@ except ImportError:
 # 1.  Sentence splitting
 # ─────────────────────────────────────────────────────────────────────
 
-from core.conversation import _split_clauses, _split_sentences
+from core.utils import split_clauses, split_sentences
 
 
 class TestSentenceSplitting:
-    """Tests for the _split_sentences helper."""
+    """Tests for the split_sentences helper."""
 
     def test_single_sentence(self):
-        assert _split_sentences("Hello world.") == ["Hello world."]
+        assert split_sentences("Hello world.") == ["Hello world."]
 
     def test_multiple_sentences(self):
-        result = _split_sentences("Hello world. How are you? I am fine!")
+        result = split_sentences("Hello world. How are you? I am fine!")
         assert result == ["Hello world.", "How are you?", "I am fine!"]
 
     def test_preserves_punctuation(self):
-        result = _split_sentences("Wait! Really? Yes.")
+        result = split_sentences("Wait! Really? Yes.")
         assert result == ["Wait!", "Really?", "Yes."]
 
     def test_no_split_on_abbreviations_with_no_space(self):
         # "e.g." doesn't have a space after the inner dots so won't split
-        result = _split_sentences("Use e.g. Python.")
+        result = split_sentences("Use e.g. Python.")
         # The regex splits on '. P' — acceptable; at least no crash
         assert len(result) >= 1
 
     def test_empty_string(self):
-        assert _split_sentences("") == []
+        assert split_sentences("") == []
 
     def test_whitespace_only(self):
-        assert _split_sentences("   ") == []
+        assert split_sentences("   ") == []
 
     def test_no_punctuation(self):
-        assert _split_sentences("Hello world") == ["Hello world"]
+        assert split_sentences("Hello world") == ["Hello world"]
 
     def test_multiple_spaces_between(self):
-        result = _split_sentences("Hello.   World!")
+        result = split_sentences("Hello.   World!")
         assert result == ["Hello.", "World!"]
 
     def test_trailing_whitespace(self):
-        result = _split_sentences("One. Two.  ")
+        result = split_sentences("One. Two.  ")
         assert result == ["One.", "Two."]
 
     def test_long_paragraph(self):
@@ -145,20 +145,20 @@ class TestSentenceSplitting:
             "Would you like to learn more? "
             "I can explain further."
         )
-        result = _split_sentences(text)
+        result = split_sentences(text)
         assert len(result) == 4
         assert result[0] == "The capital of France is Paris."
         assert result[-1] == "I can explain further."
 
     def test_clause_splitting_breaks_long_sentence(self):
         text = "Photosynthesis uses light energy, converts it to chemical energy, and stores it in glucose."
-        result = _split_clauses(text)
+        result = split_clauses(text)
         assert len(result) >= 2
         assert any("light energy" in part for part in result)
 
     def test_clause_splitting_merges_tiny_fragments(self):
         text = "Oh, OK, sure."
-        result = _split_clauses(text)
+        result = split_clauses(text)
         # Fragments under _MIN_CLAUSE_LEN chars are merged together
         assert len(result) == 1
         assert result[0] == "Oh, OK, sure."
@@ -174,20 +174,25 @@ class TestInterruptHandling:
 
     def _make_agent(self, lesson_context=""):
         """Create a ConversationalAgent with all heavy deps mocked."""
-        with patch(
-            "core.conversation.ConversationalAgent._tts_model"
-        ) as mock_tts, patch(
-            "core.conversation.ConversationalAgent._voice_state"
-        ), patch(
-            "core.conversation.ConversationalAgent._vosk_model_en"
-        ), patch(
-            "core.conversation.ConversationalAgent._openai_client"
-        ) as mock_openai, patch(
-            "core.conversation.RealtimeAudioProcessor"
-        ), patch(
+        from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
+
+        mock_tts = MagicMock()
+        mock_tts.sample_rate = 22050
+        resources = SharedResources(
+            openai_client=MagicMock(),
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
+
+        with patch("core.conversation.RealtimeAudioProcessor"), patch(
             "core.conversation.LessonRAG"
         ) as mock_rag:
-            mock_tts.sample_rate = 22050
             mock_rag_inst = MagicMock()
             mock_rag.return_value = mock_rag_inst
             mock_rag_inst.ingest = MagicMock()
@@ -195,12 +200,12 @@ class TestInterruptHandling:
             mock_rag_inst.chunk_count = 1
             mock_rag_inst.lesson_title = "Test"
 
-            from core.conversation import ConversationalAgent
-
             loop = asyncio.new_event_loop()
-            queue = asyncio.Queue()
-            agent = ConversationalAgent(queue, loop, lesson_context=lesson_context)
-            return agent, queue, loop
+            q = asyncio.Queue()
+            agent = ConversationalAgent(
+                q, loop, lesson_context=lesson_context, resources=resources
+            )
+            return agent, q, loop
 
     def test_handle_interrupt_sets_event(self):
         agent, _, _ = self._make_agent()
@@ -268,20 +273,25 @@ class TestTTSQueueing:
     """Verify _send_audio pushes (ai_text, data) onto the response queue."""
 
     def _make_agent(self):
-        with patch(
-            "core.conversation.ConversationalAgent._tts_model"
-        ) as mock_tts, patch(
-            "core.conversation.ConversationalAgent._voice_state"
-        ), patch(
-            "core.conversation.ConversationalAgent._vosk_model_en"
-        ), patch(
-            "core.conversation.ConversationalAgent._openai_client"
-        ), patch(
-            "core.conversation.RealtimeAudioProcessor"
-        ), patch(
+        from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
+
+        mock_tts = MagicMock()
+        mock_tts.sample_rate = 22050
+        resources = SharedResources(
+            openai_client=MagicMock(),
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
+
+        with patch("core.conversation.RealtimeAudioProcessor"), patch(
             "core.conversation.LessonRAG"
         ) as mock_rag:
-            mock_tts.sample_rate = 22050
             mock_rag_inst = MagicMock()
             mock_rag.return_value = mock_rag_inst
             mock_rag_inst.ingest = MagicMock()
@@ -289,12 +299,10 @@ class TestTTSQueueing:
             mock_rag_inst.chunk_count = 0
             mock_rag_inst.lesson_title = "T"
 
-            from core.conversation import ConversationalAgent
-
             loop = asyncio.new_event_loop()
-            queue = asyncio.Queue()
-            agent = ConversationalAgent(queue, loop)
-            return agent, queue, loop
+            q = asyncio.Queue()
+            agent = ConversationalAgent(q, loop, resources=resources)
+            return agent, q, loop
 
     def test_send_audio_queues_text_then_chunks_then_end(self):
         agent, queue, loop = self._make_agent()
@@ -351,6 +359,7 @@ class TestStreamLLMAndSpeak:
     def _make_agent(self):
         import numpy as np
         from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
 
         mock_tts = MagicMock()
         mock_tts.sample_rate = 22050
@@ -358,17 +367,16 @@ class TestStreamLLMAndSpeak:
             return_value=np.zeros(1000, dtype=np.float32)
         )
         mock_openai = MagicMock()
-
-        # Patch class-level attributes directly
-        orig_tts = ConversationalAgent._tts_model
-        orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._vosk_model_en
-        orig_client = ConversationalAgent._openai_client
-
-        ConversationalAgent._tts_model = mock_tts
-        ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._vosk_model_en = MagicMock()
-        ConversationalAgent._openai_client = mock_openai
+        resources = SharedResources(
+            openai_client=mock_openai,
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
             "core.conversation.LessonRAG"
@@ -381,21 +389,10 @@ class TestStreamLLMAndSpeak:
             mock_rag_inst.lesson_title = "T"
 
             loop = asyncio.new_event_loop()
-            queue = asyncio.Queue()
-            agent = ConversationalAgent(queue, loop)
+            q = asyncio.Queue()
+            agent = ConversationalAgent(q, loop, resources=resources)
 
-        # Store originals for cleanup
-        agent._orig = (orig_tts, orig_vs, orig_rec, orig_client)
-        return agent, queue, loop, mock_openai
-
-    def _cleanup(self, agent):
-        from core.conversation import ConversationalAgent
-
-        orig_tts, orig_vs, orig_rec, orig_client = agent._orig
-        ConversationalAgent._tts_model = orig_tts
-        ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._vosk_model_en = orig_rec
-        ConversationalAgent._openai_client = orig_client
+        return agent, q, loop, mock_openai
 
     def _make_stream_chunks(self, tokens):
         """Build a list of mock streaming chunk objects."""
@@ -441,7 +438,6 @@ class TestStreamLLMAndSpeak:
             assert len(agent._spoken_sentences) == 2
             mock_stream.close.assert_called_once()
         finally:
-            self._cleanup(agent)
             loop.close()
 
     def test_interrupt_stops_after_current_sentence(self):
@@ -497,7 +493,6 @@ class TestStreamLLMAndSpeak:
             assert result[0] == "First sentence is definitely long enough."
             mock_stream.close.assert_called_once()
         finally:
-            self._cleanup(agent)
             loop.close()
 
     def test_interrupted_reply_only_keeps_spoken_text_in_context(self):
@@ -526,7 +521,6 @@ class TestStreamLLMAndSpeak:
             assert "Actually spoken part." in system_msgs[-1]
             assert "Unspoken remainder." in system_msgs[-1]
         finally:
-            self._cleanup(agent)
             loop.close()
 
     def test_pending_utterance_is_processed_after_interrupt(self):
@@ -548,7 +542,6 @@ class TestStreamLLMAndSpeak:
 
             agent._handle_turn.assert_called_once_with(pending)
         finally:
-            self._cleanup(agent)
             loop.close()
 
 
@@ -562,20 +555,21 @@ class TestVoskStreamingSTT:
 
     def _make_agent(self):
         from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
 
         mock_openai = MagicMock()
         mock_tts = MagicMock()
         mock_tts.sample_rate = 22050
-
-        orig_tts = ConversationalAgent._tts_model
-        orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._vosk_model_en
-        orig_client = ConversationalAgent._openai_client
-
-        ConversationalAgent._tts_model = mock_tts
-        ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._vosk_model_en = MagicMock()
-        ConversationalAgent._openai_client = mock_openai
+        resources = SharedResources(
+            openai_client=mock_openai,
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
             "core.conversation.LessonRAG"
@@ -589,59 +583,40 @@ class TestVoskStreamingSTT:
 
             loop = asyncio.new_event_loop()
             queue = asyncio.Queue()
-            agent = ConversationalAgent(queue, loop)
+            agent = ConversationalAgent(queue, loop, resources=resources)
 
-        agent._orig = (orig_tts, orig_vs, orig_rec, orig_client)
         return agent, mock_openai
-
-    def _cleanup(self, agent):
-        from core.conversation import ConversationalAgent
-
-        orig_tts, orig_vs, orig_rec, orig_client = agent._orig
-        ConversationalAgent._tts_model = orig_tts
-        ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._vosk_model_en = orig_rec
-        ConversationalAgent._openai_client = orig_client
 
     def test_recognizer_parameter_accepted(self):
         """Agent init should succeed and create a processor with a recognizer."""
         agent, _ = self._make_agent()
-        try:
-            # Processor is mocked, just verify agent was created
-            assert agent._processor is not None
-        finally:
-            self._cleanup(agent)
+        # Processor is mocked, just verify agent was created
+        assert agent._processor is not None
 
     def test_handle_turn_receives_text(self):
         """_handle_turn now receives text (str), not PCM bytes."""
         agent, mock_openai = self._make_agent()
-        try:
-            mock_stream = MagicMock()
-            mock_stream.__iter__ = MagicMock(return_value=iter([]))
-            mock_openai.chat.completions.create.return_value = mock_stream
+        mock_stream = MagicMock()
+        mock_stream.__iter__ = MagicMock(return_value=iter([]))
+        mock_openai.chat.completions.create.return_value = mock_stream
 
-            agent._lesson_ready = False
-            agent._handle_turn("Hello world")
+        agent._lesson_ready = False
+        agent._handle_turn("Hello world")
 
-            assert any(
-                msg.get("role") == "user" and "Hello world" in msg.get("content", "")
-                for msg in agent.messages
-            )
-        finally:
-            self._cleanup(agent)
+        assert any(
+            msg.get("role") == "user" and "Hello world" in msg.get("content", "")
+            for msg in agent.messages
+        )
 
     def test_empty_text_skipped(self):
         """Empty/whitespace-only transcriptions should be ignored."""
         agent, mock_openai = self._make_agent()
-        try:
-            agent._lesson_ready = False
-            agent._handle_turn("   ")
+        agent._lesson_ready = False
+        agent._handle_turn("   ")
 
-            user_msgs = [m for m in agent.messages if m.get("role") == "user"]
-            assert len(user_msgs) == 0
-            mock_openai.chat.completions.create.assert_not_called()
-        finally:
-            self._cleanup(agent)
+        user_msgs = [m for m in agent.messages if m.get("role") == "user"]
+        assert len(user_msgs) == 0
+        mock_openai.chat.completions.create.assert_not_called()
 
 
 class TestLanguageFromMaterials:
@@ -649,20 +624,20 @@ class TestLanguageFromMaterials:
 
     def _make_agent(self, lesson_context=""):
         from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
 
-        mock_openai = MagicMock()
         mock_tts = MagicMock()
         mock_tts.sample_rate = 22050
-
-        orig_tts = ConversationalAgent._tts_model
-        orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._vosk_model_en
-        orig_client = ConversationalAgent._openai_client
-
-        ConversationalAgent._tts_model = mock_tts
-        ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._vosk_model_en = MagicMock()
-        ConversationalAgent._openai_client = mock_openai
+        resources = SharedResources(
+            openai_client=MagicMock(),
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
             "core.conversation.LessonRAG"
@@ -675,43 +650,26 @@ class TestLanguageFromMaterials:
             mock_rag_inst.lesson_title = "T"
 
             loop = asyncio.new_event_loop()
-            queue = asyncio.Queue()
-            agent = ConversationalAgent(queue, loop, lesson_context=lesson_context)
+            q = asyncio.Queue()
+            agent = ConversationalAgent(
+                q, loop, lesson_context=lesson_context, resources=resources
+            )
 
-        agent._orig = (orig_tts, orig_vs, orig_rec, orig_client)
         return agent
-
-    def _cleanup(self, agent):
-        from core.conversation import ConversationalAgent
-
-        orig_tts, orig_vs, orig_rec, orig_client = agent._orig
-        ConversationalAgent._tts_model = orig_tts
-        ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._vosk_model_en = orig_rec
-        ConversationalAgent._openai_client = orig_client
 
     def test_english_materials_set_en(self):
         agent = self._make_agent("Photosynthesis is the process plants use.")
-        try:
-            assert agent._language == "en"
-        finally:
-            self._cleanup(agent)
+        assert agent._language == "en"
 
     def test_russian_materials_set_ru(self):
         agent = self._make_agent(
             "Фотосинтез — это процесс, при котором растения используют свет."
         )
-        try:
-            assert agent._language == "ru"
-        finally:
-            self._cleanup(agent)
+        assert agent._language == "ru"
 
     def test_no_materials_defaults_to_en(self):
         agent = self._make_agent("")
-        try:
-            assert agent._language == "en"
-        finally:
-            self._cleanup(agent)
+        assert agent._language == "en"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -846,20 +804,21 @@ class TestHistoryCompression:
 
     def _make_agent(self):
         from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
 
         mock_openai = MagicMock()
         mock_tts = MagicMock()
         mock_tts.sample_rate = 22050
-
-        orig_tts = ConversationalAgent._tts_model
-        orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._vosk_model_en
-        orig_client = ConversationalAgent._openai_client
-
-        ConversationalAgent._tts_model = mock_tts
-        ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._vosk_model_en = MagicMock()
-        ConversationalAgent._openai_client = mock_openai
+        resources = SharedResources(
+            openai_client=mock_openai,
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
             "core.conversation.LessonRAG"
@@ -873,115 +832,96 @@ class TestHistoryCompression:
 
             loop = asyncio.new_event_loop()
             queue = asyncio.Queue()
-            agent = ConversationalAgent(queue, loop)
+            agent = ConversationalAgent(queue, loop, resources=resources)
 
-        agent._orig = (orig_tts, orig_vs, orig_rec, orig_client)
         return agent, mock_openai
-
-    def _cleanup(self, agent):
-        from core.conversation import ConversationalAgent
-
-        orig_tts, orig_vs, orig_rec, orig_client = agent._orig
-        ConversationalAgent._tts_model = orig_tts
-        ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._vosk_model_en = orig_rec
-        ConversationalAgent._openai_client = orig_client
 
     def test_no_compression_below_threshold(self):
         agent, mock_openai = self._make_agent()
-        try:
-            # Start with system + a few turns (well below _MAX_MESSAGES=20)
-            agent.messages = [
-                {"role": "system", "content": "system prompt"},
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi there!"},
-            ]
-            agent._compress_history()
-            # Should remain unchanged
-            assert len(agent.messages) == 3
-            mock_openai.chat.completions.create.assert_not_called()
-        finally:
-            self._cleanup(agent)
+        # Start with system + a few turns (well below _MAX_MESSAGES=20)
+        agent.messages = [
+            {"role": "system", "content": "system prompt"},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ]
+        agent._compress_history()
+        # Should remain unchanged
+        assert len(agent.messages) == 3
+        mock_openai.chat.completions.create.assert_not_called()
 
     def test_compression_above_threshold(self):
         agent, mock_openai = self._make_agent()
-        try:
-            # Build 25 messages (above _MAX_MESSAGES=20)
-            agent.messages = [{"role": "system", "content": "system prompt"}]
-            for i in range(12):
-                agent.messages.append({"role": "user", "content": f"Question {i}"})
-                agent.messages.append({"role": "assistant", "content": f"Answer {i}"})
+        # Build 25 messages (above _MAX_MESSAGES=20)
+        agent.messages = [{"role": "system", "content": "system prompt"}]
+        for i in range(12):
+            agent.messages.append({"role": "user", "content": f"Question {i}"})
+            agent.messages.append({"role": "assistant", "content": f"Answer {i}"})
 
-            assert len(agent.messages) == 25
+        assert len(agent.messages) == 25
 
-            # Mock the summarization response
-            mock_resp = MagicMock()
-            mock_resp.choices = [MagicMock()]
-            mock_resp.choices[0].message.content = "Summary of the conversation."
-            mock_openai.chat.completions.create.return_value = mock_resp
+        # Mock the summarization response
+        mock_resp = MagicMock()
+        mock_resp.choices = [MagicMock()]
+        mock_resp.choices[0].message.content = "Summary of the conversation."
+        mock_openai.chat.completions.create.return_value = mock_resp
 
-            agent._compress_history()
+        agent._compress_history()
 
-            # Should be: system + summary + last 6 messages = 8
-            assert len(agent.messages) == 8
-            assert agent.messages[0]["role"] == "system"
-            assert agent.messages[0]["content"] == "system prompt"
-            assert "[CONVERSATION SUMMARY]" in agent.messages[1]["content"]
-            assert "Summary of the conversation." in agent.messages[1]["content"]
-        finally:
-            self._cleanup(agent)
+        # Should be: system + summary + last 6 messages = 8
+        assert len(agent.messages) == 8
+        assert agent.messages[0]["role"] == "system"
+        assert agent.messages[0]["content"] == "system prompt"
+        assert "[CONVERSATION SUMMARY]" in agent.messages[1]["content"]
+        assert "Summary of the conversation." in agent.messages[1]["content"]
 
     def test_compression_failure_leaves_messages_intact(self):
         agent, mock_openai = self._make_agent()
-        try:
-            agent.messages = [{"role": "system", "content": "system prompt"}]
-            for i in range(12):
-                agent.messages.append({"role": "user", "content": f"Q {i}"})
-                agent.messages.append({"role": "assistant", "content": f"A {i}"})
+        agent.messages = [{"role": "system", "content": "system prompt"}]
+        for i in range(12):
+            agent.messages.append({"role": "user", "content": f"Q {i}"})
+            agent.messages.append({"role": "assistant", "content": f"A {i}"})
 
-            original_count = len(agent.messages)
+        original_count = len(agent.messages)
 
-            # Make summarization fail
-            mock_openai.chat.completions.create.side_effect = Exception("API error")
+        # Make summarization fail
+        mock_openai.chat.completions.create.side_effect = Exception("API error")
 
-            agent._compress_history()
+        agent._compress_history()
 
-            # Messages should be unchanged
-            assert len(agent.messages) == original_count
-        finally:
-            self._cleanup(agent)
+        # Messages should be unchanged
+        assert len(agent.messages) == original_count
 
 
 # ─────────────────────────────────────────────────────────────────────
 # 9.  Language detection
 # ─────────────────────────────────────────────────────────────────────
 
-from core.conversation import _detect_language
+from core.utils import detect_language
 
 
 class TestLanguageDetection:
-    """Tests for the _detect_language helper."""
+    """Tests for the detect_language helper."""
 
     def test_english_text(self):
-        assert _detect_language("Hello, how are you?") == "en"
+        assert detect_language("Hello, how are you?") == "en"
 
     def test_russian_text(self):
-        assert _detect_language("Привет, как дела?") == "ru"
+        assert detect_language("Привет, как дела?") == "ru"
 
     def test_mixed_text_majority_russian(self):
-        assert _detect_language("Привет world, как дела?") == "ru"
+        assert detect_language("Привет world, как дела?") == "ru"
 
     def test_mixed_text_majority_english(self):
-        assert _detect_language("Hello мир, how are you doing today?") == "en"
+        assert detect_language("Hello мир, how are you doing today?") == "en"
 
     def test_empty_string(self):
-        assert _detect_language("") == "en"
+        assert detect_language("") == "en"
 
     def test_numbers_only(self):
-        assert _detect_language("12345") == "en"
+        assert detect_language("12345") == "en"
 
     def test_punctuation_only(self):
-        assert _detect_language("!!! ???") == "en"
+        assert detect_language("!!! ???") == "en"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -995,6 +935,7 @@ class TestRussianTTS:
     def _make_agent(self):
         import numpy as np
         from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
 
         mock_tts = MagicMock()
         mock_tts.sample_rate = 22050
@@ -1006,22 +947,16 @@ class TestRussianTTS:
         mock_ru_tts.apply_tts = MagicMock(return_value=np.zeros(1000, dtype=np.float32))
 
         mock_openai = MagicMock()
-
-        orig_tts = ConversationalAgent._tts_model
-        orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._vosk_model_en
-        orig_client = ConversationalAgent._openai_client
-        orig_ru_tts = ConversationalAgent._ru_tts_model
-        orig_ru_speaker = ConversationalAgent._ru_speaker
-        orig_ru_sr = ConversationalAgent._ru_sample_rate
-
-        ConversationalAgent._tts_model = mock_tts
-        ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._vosk_model_en = MagicMock()
-        ConversationalAgent._openai_client = mock_openai
-        ConversationalAgent._ru_tts_model = mock_ru_tts
-        ConversationalAgent._ru_speaker = "baya"
-        ConversationalAgent._ru_sample_rate = 24000
+        resources = SharedResources(
+            openai_client=mock_openai,
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=mock_ru_tts,
+            ru_speaker="baya",
+            ru_sample_rate=24000,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
             "core.conversation.LessonRAG"
@@ -1035,71 +970,33 @@ class TestRussianTTS:
 
             loop = asyncio.new_event_loop()
             queue = asyncio.Queue()
-            agent = ConversationalAgent(queue, loop)
+            agent = ConversationalAgent(queue, loop, resources=resources)
 
-        agent._orig = (
-            orig_tts,
-            orig_vs,
-            orig_rec,
-            orig_client,
-            orig_ru_tts,
-            orig_ru_speaker,
-            orig_ru_sr,
-        )
         return agent, mock_tts, mock_ru_tts
-
-    def _cleanup(self, agent):
-        from core.conversation import ConversationalAgent
-
-        (
-            orig_tts,
-            orig_vs,
-            orig_rec,
-            orig_client,
-            orig_ru_tts,
-            orig_ru_speaker,
-            orig_ru_sr,
-        ) = agent._orig
-        ConversationalAgent._tts_model = orig_tts
-        ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._vosk_model_en = orig_rec
-        ConversationalAgent._openai_client = orig_client
-        ConversationalAgent._ru_tts_model = orig_ru_tts
-        ConversationalAgent._ru_speaker = orig_ru_speaker
-        ConversationalAgent._ru_sample_rate = orig_ru_sr
 
     def test_english_uses_pocket_tts(self):
         agent, mock_tts, mock_ru_tts = self._make_agent()
-        try:
-            agent._synthesise_sentence("Hello, how are you today?")
-            mock_tts.generate_audio.assert_called_once()
-            mock_ru_tts.apply_tts.assert_not_called()
-        finally:
-            self._cleanup(agent)
+        agent._synthesise_sentence("Hello, how are you today?")
+        mock_tts.generate_audio.assert_called_once()
+        mock_ru_tts.apply_tts.assert_not_called()
 
     def test_russian_uses_silero_tts(self):
         agent, mock_tts, mock_ru_tts = self._make_agent()
-        try:
-            agent._synthesise_sentence("Привет, как дела?")
-            mock_ru_tts.apply_tts.assert_called_once_with(
-                text="Привет, как дела?",
-                speaker="baya",
-                sample_rate=24000,
-            )
-            mock_tts.generate_audio.assert_not_called()
-        finally:
-            self._cleanup(agent)
+        agent._synthesise_sentence("Привет, как дела?")
+        mock_ru_tts.apply_tts.assert_called_once_with(
+            text="Привет, как дела?",
+            speaker="baya",
+            sample_rate=24000,
+        )
+        mock_tts.generate_audio.assert_not_called()
 
     def test_russian_fallback_when_model_missing(self):
         agent, mock_tts, mock_ru_tts = self._make_agent()
-        try:
-            from core.conversation import ConversationalAgent
+        from dataclasses import replace
 
-            ConversationalAgent._ru_tts_model = None
-            agent._synthesise_sentence("Привет, как дела?")
-            mock_tts.generate_audio.assert_called_once()
-        finally:
-            self._cleanup(agent)
+        agent._resources = replace(agent._resources, ru_tts_model=None)
+        agent._synthesise_sentence("Привет, как дела?")
+        mock_tts.generate_audio.assert_called_once()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1113,20 +1010,20 @@ class TestSentenceDeliveryOnInterrupt:
 
     def _make_agent(self):
         from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
 
         mock_tts = MagicMock()
         mock_tts.sample_rate = 22050
-        mock_openai = MagicMock()
-
-        orig_tts = ConversationalAgent._tts_model
-        orig_vs = ConversationalAgent._voice_state
-        orig_rec = ConversationalAgent._vosk_model_en
-        orig_client = ConversationalAgent._openai_client
-
-        ConversationalAgent._tts_model = mock_tts
-        ConversationalAgent._voice_state = MagicMock()
-        ConversationalAgent._vosk_model_en = MagicMock()
-        ConversationalAgent._openai_client = mock_openai
+        resources = SharedResources(
+            openai_client=MagicMock(),
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
 
         with patch("core.conversation.RealtimeAudioProcessor"), patch(
             "core.conversation.LessonRAG"
@@ -1140,63 +1037,47 @@ class TestSentenceDeliveryOnInterrupt:
 
             loop = asyncio.new_event_loop()
             queue = asyncio.Queue()
-            agent = ConversationalAgent(queue, loop)
+            agent = ConversationalAgent(queue, loop, resources=resources)
 
-        agent._orig = (orig_tts, orig_vs, orig_rec, orig_client)
         return agent, queue, loop
-
-    def _cleanup(self, agent):
-        from core.conversation import ConversationalAgent
-
-        orig_tts, orig_vs, orig_rec, orig_client = agent._orig
-        ConversationalAgent._tts_model = orig_tts
-        ConversationalAgent._voice_state = orig_vs
-        ConversationalAgent._vosk_model_en = orig_rec
-        ConversationalAgent._openai_client = orig_client
 
     def test_full_sentence_audio_delivered(self):
         """All chunks for a sentence should be delivered without
         mid-sentence interrupt checks."""
         agent, queue, loop = self._make_agent()
-        try:
-            # Audio that spans 3 chunks (each 32768 bytes)
-            wav_bytes = b"\x00" * 80000
+        # Audio that spans 3 chunks (each 32768 bytes)
+        wav_bytes = b"\x00" * 80000
 
-            def _run():
-                agent._send_audio(wav_bytes, ai_text="Complete sentence.")
+        def _run():
+            agent._send_audio(wav_bytes, ai_text="Complete sentence.")
 
-            t = threading.Thread(target=_run, daemon=True)
-            t.start()
-            t.join(timeout=2)
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout=2)
 
-            messages = []
+        messages = []
 
-            async def _drain():
-                while not queue.empty():
-                    messages.append(await queue.get())
+        async def _drain():
+            while not queue.empty():
+                messages.append(await queue.get())
 
-            loop.run_until_complete(_drain())
+        loop.run_until_complete(_drain())
 
-            assert messages[0] == ("ai_text", "Complete sentence.")
-            assert messages[-1] == ("end", None)
-            audio_msgs = [m for m in messages if m[0] == "audio"]
-            total_audio = sum(len(m[1]) for m in audio_msgs)
-            assert total_audio == 80000
-        finally:
-            self._cleanup(agent)
-            loop.close()
+        assert messages[0] == ("ai_text", "Complete sentence.")
+        assert messages[-1] == ("end", None)
+        audio_msgs = [m for m in messages if m[0] == "audio"]
+        total_audio = sum(len(m[1]) for m in audio_msgs)
+        assert total_audio == 80000
+        loop.close()
 
     def test_initial_interrupt_check_still_works(self):
         """If interrupted before _send_audio starts, nothing is sent."""
         agent, queue, loop = self._make_agent()
-        try:
-            agent._interrupted.set()
-            agent._send_audio(b"\x00" * 100, ai_text="Should not send.")
-            time.sleep(0.05)
-            assert queue.empty()
-        finally:
-            self._cleanup(agent)
-            loop.close()
+        agent._interrupted.set()
+        agent._send_audio(b"\x00" * 100, ai_text="Should not send.")
+        time.sleep(0.05)
+        assert queue.empty()
+        loop.close()
 
 
 # ─────────────────────────────────────────────────────────────────────

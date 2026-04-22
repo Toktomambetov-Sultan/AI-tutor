@@ -10,11 +10,13 @@ and the ConversationalAgent.  Supports:
 
 import asyncio
 import logging
+from typing import Callable
 
 import grpc
 from proto import audio_pb2
 
 from core.conversation import ConversationalAgent
+from core.protocol import MessageType, QueueMessage
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,21 @@ class AudioServicer:
     Implements the AudioService gRPC interface using AsyncIO.
     Integrates the ConversationalAgent with RAG-powered lesson awareness.
     """
+
+    def __init__(
+        self,
+        agent_factory: (
+            Callable[
+                [asyncio.Queue, asyncio.AbstractEventLoop, str], ConversationalAgent
+            ]
+            | None
+        ) = None,
+    ):
+        self._agent_factory = agent_factory or (
+            lambda response_queue, loop, lesson_context: ConversationalAgent(
+                response_queue, loop, lesson_context=lesson_context
+            )
+        )
 
     async def StreamAudio(self, request_iterator, context):
         """
@@ -64,13 +81,17 @@ class AudioServicer:
                         else:
                             logger.info("No lesson context provided — generic mode")
 
-                        agent = ConversationalAgent(
-                            response_queue, loop, lesson_context=lesson_context
+                        agent = self._agent_factory(
+                            response_queue,
+                            loop,
+                            lesson_context,
                         )
                         first_message = False
 
                         # ── Send "ready" signal to the client ──
-                        await response_queue.put(("signal", "ready"))
+                        await response_queue.put(
+                            QueueMessage(MessageType.SIGNAL, "ready")
+                        )
 
                         if chunk.data:
                             agent.process_audio_chunk(chunk.data)
@@ -103,7 +124,7 @@ class AudioServicer:
                         response_queue.get(), timeout=0.1
                     )
 
-                    if msg_type == "signal":
+                    if msg_type == MessageType.SIGNAL:
                         if data == "interrupt":
                             # Interrupt — discard any buffered audio so
                             # the client receives the signal immediately.
@@ -111,14 +132,14 @@ class AudioServicer:
                             current_ai_text = ""
                         yield audio_pb2.AudioChunk(signal=data)
 
-                    elif msg_type == "audio":
+                    elif msg_type == MessageType.AUDIO:
                         audio_buffer.extend(data)
 
-                    elif msg_type == "ai_text":
+                    elif msg_type == MessageType.AI_TEXT:
                         # Text of the sentence whose audio follows
                         current_ai_text = data
 
-                    elif msg_type == "end":
+                    elif msg_type == MessageType.END:
                         if audio_buffer:
                             yield audio_pb2.AudioChunk(
                                 data=bytes(audio_buffer),

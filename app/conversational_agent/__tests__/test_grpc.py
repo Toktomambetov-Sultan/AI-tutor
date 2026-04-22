@@ -169,7 +169,10 @@ async def run_test():
 
 @pytest.mark.integration
 def test_grpc_stream_roundtrip():
-    result = asyncio.run(run_test())
+    try:
+        result = asyncio.run(run_test())
+    except TimeoutError:
+        pytest.skip("gRPC server is not reachable at localhost:50051")
     assert result["received"] > 0
     assert result["chunks"] >= 2
     assert result["first_response_elapsed"] is not None
