@@ -1,5 +1,44 @@
 /* ─── Student Pages ─── */
 
+.student-courses-page,
+.student-course-overview-page,
+.lesson-viewer {
+    width: 100%;
+    max-width: 1240px;
+}
+
+.student-courses-hero {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 1rem;
+    margin-bottom: 1.1rem;
+    padding: 1.15rem 1.2rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: linear-gradient(150deg, #f8fbff 0%, #eef8ff 58%, #f6fbff 100%);
+}
+
+.student-courses-hero h1 {
+    margin-bottom: 0.35rem;
+}
+
+.student-courses-hero p {
+    color: var(--text-secondary);
+    margin: 0;
+    font-size: 0.92rem;
+}
+
+.student-courses-count {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.32rem 0.72rem;
+    white-space: nowrap;
+}
+
 /* Course grid */
 .course-grid {
     display: grid;
@@ -54,15 +93,34 @@
 
 /* ─── Course Overview ─── */
 .course-overview {
-    max-width: 800px;
+    max-width: none;
+}
+
+.student-overview-topbar {
+    margin-bottom: 0.9rem;
+}
+
+.student-overview-layout {
+    display: grid;
+    grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+    gap: 1.1rem;
+    align-items: start;
+}
+
+.student-overview-rail {
+    position: sticky;
+    top: 84px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
 }
 
 .course-overview-header {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
-    padding: 2rem;
-    margin-bottom: 2rem;
+    padding: 1.25rem;
+    margin-bottom: 0;
     box-shadow: var(--shadow-sm);
 }
 
@@ -82,7 +140,22 @@
 .course-overview-desc {
     color: var(--text-secondary);
     font-size: 0.9375rem;
-    line-height: 1.7;
+    line-height: 1.6;
+}
+
+.student-overview-stats {
+    padding: 0.9rem 1rem;
+}
+
+.student-overview-stats h4 {
+    margin-bottom: 0.5rem;
+    font-size: 0.92rem;
+}
+
+.student-overview-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
 }
 
 /* ─── Course Structure ─── */
@@ -148,8 +221,7 @@
 
 /* ─── Lesson Viewer ─── */
 .lesson-viewer {
-    width: 100%;
-    max-width: 1100px;
+    max-width: 1240px;
 }
 
 .lesson-viewer-layout {
@@ -279,8 +351,21 @@
 
 /* ─── Responsive ─── */
 @media (max-width: 768px) {
+    .student-courses-hero {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
     .course-grid {
         grid-template-columns: 1fr;
+    }
+
+    .student-overview-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .student-overview-rail {
+        position: static;
     }
 
     .course-overview-header {

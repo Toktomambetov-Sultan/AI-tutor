@@ -191,59 +191,63 @@ export default function CourseDetail() {
                 Back to Courses
             </button>
 
-            <div className="course-header-card">
-                <div className="course-header-info">
-                    <h1>{course.title}</h1>
-                    {course.description && <p className="course-description">{course.description}</p>}
-                    <div className="course-stats">
-                        <span className="stat-chip">📁 {classes.length} class{classes.length !== 1 ? 'es' : ''}</span>
-                        <span className="stat-chip">📖 {classes.reduce((a, c) => a + (c.lessons?.length || 0), 0)} lessons</span>
-                    </div>
-                </div>
-            </div>
-
-            {error && <div className="alert alert-error">{error}<button className="alert-close" onClick={() => setError('')}>×</button></div>}
-            {successMsg && <div className="alert alert-success">{successMsg}</div>}
-
-            <div className="section">
-                <div className="section-header">
-                    <h2>Classes &amp; Lessons</h2>
-                    <button className="btn-primary btn-sm" onClick={() => setShowClassForm(!showClassForm)}>
-                        {showClassForm ? 'Cancel' : '+ Add Class'}
-                    </button>
-                </div>
-
-                {showClassForm && (
-                    <div className="inline-form-card">
-                        <form onSubmit={handleCreateClass}>
-                            <div className="inline-form-row">
-                                <div className="form-group" style={{ flex: 1 }}>
-                                    <label>Class Title</label>
-                                    <input type="text" value={classTitle} onChange={e => setClassTitle(e.target.value)} placeholder="e.g., Week 1: Introduction" required />
-                                </div>
-                                <div className="form-group" style={{ width: '100px' }}>
-                                    <label>Order</label>
-                                    <input type="number" value={classOrder} onChange={e => setClassOrder(parseInt(e.target.value) || 0)} />
-                                </div>
-                                <button type="submit" className="btn-primary btn-sm" style={{ alignSelf: 'flex-end', marginBottom: '1rem' }}>Create</button>
+            <div className="teacher-detail-layout">
+                <aside className="teacher-detail-rail">
+                    <div className="course-header-card">
+                        <div className="course-header-info">
+                            <h1>{course.title}</h1>
+                            {course.description && <p className="course-description">{course.description}</p>}
+                            <div className="course-stats">
+                                <span className="stat-chip">📁 {classes.length} class{classes.length !== 1 ? 'es' : ''}</span>
+                                <span className="stat-chip">📖 {classes.reduce((a, c) => a + (c.lessons?.length || 0), 0)} lessons</span>
                             </div>
-                        </form>
+                        </div>
                     </div>
-                )}
+                </aside>
 
-                {classes.length === 0 ? (
-                    <div className="empty-state-card">
-                        <div className="empty-icon">📚</div>
-                        <h3>No classes yet</h3>
-                        <p>Create your first class to start building course content.</p>
-                    </div>
-                ) : (
-                    <div className="accordion-list">
-                        {classes.map(cls => {
-                            const isExpanded = expandedClasses[cls.id];
-                            const lessons = cls.lessons || [];
-                            return (
-                                <div key={cls.id} className={`accordion-item ${isExpanded ? 'expanded' : ''}`}>
+                <section className="teacher-detail-main">
+                    {error && <div className="alert alert-error">{error}<button className="alert-close" onClick={() => setError('')}>×</button></div>}
+                    {successMsg && <div className="alert alert-success">{successMsg}</div>}
+
+                    <div className="section">
+                        <div className="section-header">
+                            <h2>Classes &amp; Lessons</h2>
+                            <button className="btn-primary btn-sm" onClick={() => setShowClassForm(!showClassForm)}>
+                                {showClassForm ? 'Cancel' : '+ Add Class'}
+                            </button>
+                        </div>
+
+                        {showClassForm && (
+                            <div className="inline-form-card">
+                                <form onSubmit={handleCreateClass}>
+                                    <div className="inline-form-row">
+                                        <div className="form-group" style={{ flex: 1 }}>
+                                            <label>Class Title</label>
+                                            <input type="text" value={classTitle} onChange={e => setClassTitle(e.target.value)} placeholder="e.g., Week 1: Introduction" required />
+                                        </div>
+                                        <div className="form-group" style={{ width: '100px' }}>
+                                            <label>Order</label>
+                                            <input type="number" value={classOrder} onChange={e => setClassOrder(parseInt(e.target.value) || 0)} />
+                                        </div>
+                                        <button type="submit" className="btn-primary btn-sm" style={{ alignSelf: 'flex-end', marginBottom: '1rem' }}>Create</button>
+                                    </div>
+                                </form>
+                            </div>
+                        )}
+
+                        {classes.length === 0 ? (
+                            <div className="empty-state-card">
+                                <div className="empty-icon">📚</div>
+                                <h3>No classes yet</h3>
+                                <p>Create your first class to start building course content.</p>
+                            </div>
+                        ) : (
+                            <div className="accordion-list">
+                                {classes.map(cls => {
+                                    const isExpanded = expandedClasses[cls.id];
+                                    const lessons = cls.lessons || [];
+                                    return (
+                                        <div key={cls.id} className={`accordion-item ${isExpanded ? 'expanded' : ''}`}>
                                     <div className="accordion-header" onClick={() => toggleClass(cls.id)}>
                                         <div className="accordion-title-area">
                                             <svg className={`chevron ${isExpanded ? 'open' : ''}`} width="18" height="18" viewBox="0 0 16 16" fill="none"><path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -343,11 +347,13 @@ export default function CourseDetail() {
                                             )}
                                         </div>
                                     )}
-                                </div>
-                            );
-                        })}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
                     </div>
-                )}
+                </section>
             </div>
 
             {/* Text Material Preview Modal */}

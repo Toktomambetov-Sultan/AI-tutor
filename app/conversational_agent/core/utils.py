@@ -10,6 +10,11 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 # first-audio-byte latency.
 _CLAUSE_RE = re.compile(r"(?<=[.!?;:,\u2014])\s+")
 _TRAILING_CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;:,\u2014][\"')\]]?\s*$")
+_TRAILING_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?][\"')\]]?\s*$")
+_TRAILING_CONTINUATION_RE = re.compile(
+    r"\b(and|or|but|so|then|also|because|if|when|that|to|of|for|with|about|into|from|as)\s*$",
+    re.IGNORECASE,
+)
 
 # Minimum character length for a clause to be spoken on its own.
 # Shorter fragments are accumulated into the next clause.
@@ -52,6 +57,27 @@ def has_trailing_clause_boundary(text: str) -> bool:
     if not text or not text.strip():
         return False
     return bool(_TRAILING_CLAUSE_BOUNDARY_RE.search(text))
+
+
+def classify_utterance_ending_quality(text: str) -> str:
+    """Classify utterance ending quality as ``strong``, ``weak``, or ``partial``."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return "partial"
+
+    if _TRAILING_SENTENCE_BOUNDARY_RE.search(cleaned):
+        return "strong"
+
+    if cleaned.endswith("-") or _TRAILING_CONTINUATION_RE.search(cleaned):
+        return "partial"
+
+    if len(cleaned.split()) <= 2:
+        return "partial"
+
+    if has_trailing_clause_boundary(cleaned):
+        return "weak"
+
+    return "weak"
 
 
 # ─── Language detection ──────────────────────────────────────────────

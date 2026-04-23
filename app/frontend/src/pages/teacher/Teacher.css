@@ -1,5 +1,58 @@
 /* ─── Teacher Pages ─── */
 
+.teacher-course-list-page,
+.course-detail-page {
+    width: 100%;
+    max-width: 1280px;
+}
+
+.teacher-page-header {
+    margin-bottom: 1rem;
+}
+
+.teacher-page-header p {
+    margin: 0;
+    font-size: 0.92rem;
+    color: var(--text-secondary);
+}
+
+.teacher-course-list-layout {
+    display: grid;
+    grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+    gap: 1.1rem;
+    align-items: start;
+}
+
+.teacher-course-controls {
+    position: sticky;
+    top: 84px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+}
+
+.teacher-control-card {
+    padding: 1rem 1.1rem;
+}
+
+.teacher-control-card h3 {
+    margin-bottom: 0.45rem;
+}
+
+.teacher-control-card p {
+    margin-bottom: 0.75rem;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+}
+
+.teacher-create-form-card {
+    margin-bottom: 0;
+}
+
+.teacher-course-results {
+    min-width: 0;
+}
+
 /* Course grid */
 .course-grid {
     display: grid;
@@ -54,7 +107,23 @@
 
 /* ─── Course Detail Page ─── */
 .course-detail-page {
-    max-width: 900px;
+    max-width: 1280px;
+}
+
+.teacher-detail-layout {
+    display: grid;
+    grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+    gap: 1.1rem;
+    align-items: start;
+}
+
+.teacher-detail-rail {
+    position: sticky;
+    top: 84px;
+}
+
+.teacher-detail-main {
+    min-width: 0;
 }
 
 .course-header-card {
@@ -391,6 +460,16 @@
 
 /* ─── Responsive ─── */
 @media (max-width: 768px) {
+    .teacher-course-list-layout,
+    .teacher-detail-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .teacher-course-controls,
+    .teacher-detail-rail {
+        position: static;
+    }
+
     .course-grid {
         grid-template-columns: 1fr;
     }

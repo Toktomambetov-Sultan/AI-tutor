@@ -23,6 +23,7 @@ import logging
 import queue
 import re
 import threading
+import time
 from typing import Callable
 
 import scipy.io.wavfile
@@ -44,6 +45,8 @@ from core.protocol import MessageType, QueueMessage
 from core.rag import LessonRAG
 from core.resources import SharedResources, build_default_shared_resources
 from core.session_state import SessionState
+from core.tempo import NORMAL, apply_tempo_shaping, classify_tempo
+from core.turn_policy import TimingAwareTurnGate
 from core.utils import (
     detect_language,
     extract_text_from_lesson_context,
@@ -54,7 +57,7 @@ from core.utils import (
 logger = logging.getLogger(__name__)
 
 _POSITIVE_TTS_HINT_RE = re.compile(
-    r"\\b(great|excellent|well done|nice work|good job|awesome|perfect)\\b",
+    r"\b(great|excellent|well done|nice work|good job|awesome|perfect)\b",
     re.IGNORECASE,
 )
 
@@ -150,6 +153,13 @@ class ConversationalAgent:
         self._pending_utterance: str | None = None
         self._first_turn = True
 
+        # Turn gate and tempo state — fully initialised in _init_processor
+        self._turn_gate: TimingAwareTurnGate | None = None
+        self._student_utterances: list[str] = []
+        self._student_turn_durations_sec: list[float] = []
+        self._last_student_turn_monotonic: float | None = None
+        self._current_tempo_hint: str = NORMAL
+
     def _init_processor(
         self,
         recognizer_factory: Callable[[VoskModel, int], object],
@@ -169,8 +179,9 @@ class ConversationalAgent:
             self._language,
             "ready" if recognizer else "unavailable",
         )
+        self._turn_gate = TimingAwareTurnGate(self._on_utterance_detected)
         self._processor = audio_processor_factory(
-            on_utterance=self._on_utterance_detected,
+            on_utterance=self._turn_gate.feed,
             recognizer=recognizer,
         )
 
@@ -216,6 +227,8 @@ class ConversationalAgent:
         """Clean up ffmpeg and RAG resources."""
         self._processor.close()
         self.rag.close()
+        if self._turn_gate is not None:
+            self._turn_gate.close()
 
     # ────────────────────────────────────────────────────────────
     # Conversation history compression
@@ -311,12 +324,16 @@ class ConversationalAgent:
         if lang != "en":
             return sentence
 
-        if not RUNTIME_CONFIG.tts.enable_emotion:
-            return sentence
-
         text = sentence.strip()
         if not text:
             return sentence
+
+        # Apply tempo prosody shaping before emotion markup
+        if RUNTIME_CONFIG.tempo.adapt_enabled:
+            text = apply_tempo_shaping(text, self._current_tempo_hint)
+
+        if not RUNTIME_CONFIG.tts.enable_emotion:
+            return text
 
         strength = RUNTIME_CONFIG.tts.emotion_strength
         extra_exclamations = 1 + int(strength * 2)
@@ -400,6 +417,13 @@ class ConversationalAgent:
         self._interrupted.clear()
         self._spoken_sentences = []
         self._current_ai_text = ""
+
+        # Emit advisory tempo hint so clients can adjust playback speed.
+        if RUNTIME_CONFIG.tempo.adapt_enabled:
+            self.loop.call_soon_threadsafe(
+                self.response_queue.put_nowait,
+                QueueMessage(MessageType.TEMPO_HINT, self._current_tempo_hint),
+            )
 
         # ── TTS worker (consumer) ──
         sentence_q: queue.Queue[str | None] = queue.Queue()
@@ -566,6 +590,33 @@ class ConversationalAgent:
 
             if text.lower() in ("quit", "exit", "stop"):
                 return
+
+            # ── 0. Track utterance for tempo adaptation ──
+            now = time.monotonic()
+            tempo_cfg = RUNTIME_CONFIG.tempo
+            if self._last_student_turn_monotonic is None:
+                turn_duration_sec = tempo_cfg.neutral_turn_duration_sec
+            else:
+                raw_delta = max(0.0, now - self._last_student_turn_monotonic)
+                turn_duration_sec = max(
+                    tempo_cfg.min_turn_duration_sec,
+                    min(tempo_cfg.max_turn_duration_sec, raw_delta),
+                )
+            self._last_student_turn_monotonic = now
+
+            self._student_utterances.append(text)
+            self._student_turn_durations_sec.append(turn_duration_sec)
+            if len(self._student_utterances) > 10:
+                self._student_utterances = self._student_utterances[-10:]
+            if len(self._student_turn_durations_sec) > 10:
+                self._student_turn_durations_sec = self._student_turn_durations_sec[-10:]
+            if RUNTIME_CONFIG.tempo.adapt_enabled:
+                recent_utterances = self._student_utterances[-5:]
+                self._current_tempo_hint = classify_tempo(
+                    recent_utterances,
+                    self._student_turn_durations_sec[-len(recent_utterances) :],
+                )
+                logger.debug("Tempo hint updated: %s", self._current_tempo_hint)
 
             # ── 1. Build interrupt context if the student interrupted ──
             interrupt_note = ""

@@ -22,9 +22,13 @@ export default function CourseBrowser() {
     };
 
     return (
-        <div>
-            <div className="page-header">
-                <h1>Browse Courses</h1>
+        <div className="student-courses-page">
+            <div className="student-courses-hero">
+                <div>
+                    <h1>Browse Courses</h1>
+                    <p>Pick a course and jump straight into lessons with your AI tutor.</p>
+                </div>
+                <span className="student-courses-count">{courses.length} courses</span>
             </div>
 
             {error && <div className="alert alert-error">{error}</div>}

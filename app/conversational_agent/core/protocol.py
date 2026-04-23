@@ -18,6 +18,9 @@ class MessageType(str, Enum):
     AUDIO = "audio"
     AI_TEXT = "ai_text"
     END = "end"
+    # Advisory tempo hint emitted before each agent reply.
+    # Clients that do not recognise this type should ignore it safely.
+    TEMPO_HINT = "tempo_hint"
 
 
 class QueueMessage(NamedTuple):

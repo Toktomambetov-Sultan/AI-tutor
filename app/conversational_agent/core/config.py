@@ -74,10 +74,49 @@ class TTSRuntimeConfig:
 
 
 @dataclass(frozen=True)
+class TurnPolicyConfig:
+    """Timing-aware turn decision thresholds."""
+
+    # Utterances with fewer words than this AND no terminal punctuation
+    # are treated as partial thoughts that should wait for continuation.
+    min_words_for_complete: int
+    # Maximum seconds of silence after a partial utterance before the
+    # agent is forced to reply regardless.
+    force_reply_sec: float
+    # Minimum recent silence window required before treating a boundary-less
+    # complete-length utterance as ready to respond.
+    min_recent_silence_sec: float
+    # If a likely partial thought is followed by at least this much silence,
+    # allow an early response without waiting for full force-reply timeout.
+    partial_respond_silence_sec: float
+    # Minimum silence accepted for punctuation-ended utterances to reduce
+    # over-eager responses on clipped ASR boundaries.
+    min_strong_boundary_silence_sec: float
+
+
+@dataclass(frozen=True)
+class TempoConfig:
+    """Speech tempo adaptation settings."""
+
+    adapt_enabled: bool
+    # WPM below this value → SLOW hint
+    slow_wpm_threshold: float
+    # WPM at or above this value → FAST hint
+    fast_wpm_threshold: float
+    # Synthetic first-turn timing prior used when no timing history exists.
+    neutral_turn_duration_sec: float
+    # Lower/upper bounds used to clamp per-turn timing in safe ranges.
+    min_turn_duration_sec: float
+    max_turn_duration_sec: float
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     audio: AudioRuntimeConfig
     llm: LLMRuntimeConfig
     tts: TTSRuntimeConfig
+    turn_policy: TurnPolicyConfig
+    tempo: TempoConfig
 
 
 def load_runtime_config() -> RuntimeConfig:
@@ -111,6 +150,35 @@ def load_runtime_config() -> RuntimeConfig:
             enable_emotion=_get_env_bool("AGENT_TTS_ENABLE_EMOTION", True),
             emotion_strength=min(
                 1.0, max(0.0, _get_env_float("AGENT_TTS_EMOTION_STRENGTH", 0.5))
+            ),
+        ),
+        turn_policy=TurnPolicyConfig(
+            min_words_for_complete=max(1, _get_env_int("AGENT_TURN_MIN_WORDS", 4)),
+            force_reply_sec=max(0.5, _get_env_float("AGENT_TURN_FORCE_REPLY_SEC", 2.2)),
+            min_recent_silence_sec=max(
+                0.0, _get_env_float("AGENT_TURN_MIN_RECENT_SILENCE_SEC", 0.3)
+            ),
+            partial_respond_silence_sec=max(
+                0.2,
+                _get_env_float("AGENT_TURN_PARTIAL_RESPOND_SILENCE_SEC", 0.9),
+            ),
+            min_strong_boundary_silence_sec=max(
+                0.0,
+                _get_env_float("AGENT_TURN_MIN_STRONG_BOUNDARY_SILENCE_SEC", 0.08),
+            ),
+        ),
+        tempo=TempoConfig(
+            adapt_enabled=_get_env_bool("AGENT_TEMPO_ADAPT_ENABLED", True),
+            slow_wpm_threshold=_get_env_float("AGENT_TEMPO_SLOW_WPM", 80.0),
+            fast_wpm_threshold=_get_env_float("AGENT_TEMPO_FAST_WPM", 160.0),
+            neutral_turn_duration_sec=max(
+                0.5, _get_env_float("AGENT_TEMPO_NEUTRAL_TURN_DURATION_SEC", 2.5)
+            ),
+            min_turn_duration_sec=max(
+                0.1, _get_env_float("AGENT_TEMPO_MIN_TURN_DURATION_SEC", 0.4)
+            ),
+            max_turn_duration_sec=max(
+                1.0, _get_env_float("AGENT_TEMPO_MAX_TURN_DURATION_SEC", 12.0)
             ),
         ),
     )
