@@ -35,6 +35,13 @@ def _get_env_str(name: str, default: str) -> str:
     return value if value else default
 
 
+def _get_env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class AudioRuntimeConfig:
     vad_threshold: float
@@ -61,9 +68,16 @@ class LLMRuntimeConfig:
 
 
 @dataclass(frozen=True)
+class TTSRuntimeConfig:
+    enable_emotion: bool
+    emotion_strength: float
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     audio: AudioRuntimeConfig
     llm: LLMRuntimeConfig
+    tts: TTSRuntimeConfig
 
 
 def load_runtime_config() -> RuntimeConfig:
@@ -92,6 +106,12 @@ def load_runtime_config() -> RuntimeConfig:
             presence_penalty=_get_env_float("AGENT_LLM_PRESENCE_PENALTY", 0.0),
             frequency_penalty=_get_env_float("AGENT_LLM_FREQUENCY_PENALTY", 0.15),
             max_tokens=max(48, _get_env_int("AGENT_LLM_MAX_TOKENS", 120)),
+        ),
+        tts=TTSRuntimeConfig(
+            enable_emotion=_get_env_bool("AGENT_TTS_ENABLE_EMOTION", True),
+            emotion_strength=min(
+                1.0, max(0.0, _get_env_float("AGENT_TTS_EMOTION_STRENGTH", 0.5))
+            ),
         ),
     )
 

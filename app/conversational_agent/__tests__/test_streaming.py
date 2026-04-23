@@ -98,7 +98,7 @@ except ImportError:
 # 1.  Sentence splitting
 # ─────────────────────────────────────────────────────────────────────
 
-from core.utils import split_clauses, split_sentences
+from core.utils import has_trailing_clause_boundary, split_clauses, split_sentences
 
 
 class TestSentenceSplitting:
@@ -162,6 +162,12 @@ class TestSentenceSplitting:
         # Fragments under _MIN_CLAUSE_LEN chars are merged together
         assert len(result) == 1
         assert result[0] == "Oh, OK, sure."
+
+    def test_clause_boundary_detection_true_when_ending_with_punctuation(self):
+        assert has_trailing_clause_boundary("Great work!") is True
+
+    def test_clause_boundary_detection_false_for_partial_tail(self):
+        assert has_trailing_clause_boundary("Great work and") is False
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -997,6 +1003,21 @@ class TestRussianTTS:
         agent._resources = replace(agent._resources, ru_tts_model=None)
         agent._synthesise_sentence("Привет, как дела?")
         mock_tts.generate_audio.assert_called_once()
+
+    def test_emotion_style_boosts_english_positive_sentence(self):
+        from dataclasses import replace
+
+        from core.config import RUNTIME_CONFIG
+
+        agent, mock_tts, _ = self._make_agent()
+        tts_cfg = replace(RUNTIME_CONFIG.tts, enable_emotion=True, emotion_strength=1.0)
+        runtime_cfg = replace(RUNTIME_CONFIG, tts=tts_cfg)
+
+        with patch("core.conversation.RUNTIME_CONFIG", runtime_cfg):
+            agent._synthesise_sentence("Great work.")
+
+        rendered_text = mock_tts.generate_audio.call_args.args[1]
+        assert rendered_text.endswith("!")
 
 
 # ─────────────────────────────────────────────────────────────────────

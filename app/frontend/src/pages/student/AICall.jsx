@@ -19,6 +19,8 @@ const TURN = {
     STUDENT: 'student',
 };
 
+const MEDIA_RECORDER_CHUNK_MS = 180;
+
 export default function AICall() {
     const { lessonId } = useParams();
     const navigate = useNavigate();
@@ -392,7 +394,8 @@ export default function AICall() {
             }
         };
 
-        recorder.start(250);
+        // Smaller timeslices lower end-to-end latency without touching STT model quality.
+        recorder.start(MEDIA_RECORDER_CHUNK_MS);
     }, [sendInterrupt, getMicRMS]);
 
     // ─── End call ───

@@ -9,6 +9,7 @@ _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 # that long sentences are broken into shorter TTS chunks, reducing
 # first-audio-byte latency.
 _CLAUSE_RE = re.compile(r"(?<=[.!?;:,\u2014])\s+")
+_TRAILING_CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;:,\u2014][\"')\]]?\s*$")
 
 # Minimum character length for a clause to be spoken on its own.
 # Shorter fragments are accumulated into the next clause.
@@ -44,6 +45,13 @@ def split_clauses(text: str) -> list[str]:
         else:
             merged.append(buf)
     return merged
+
+
+def has_trailing_clause_boundary(text: str) -> bool:
+    """Return True when *text* currently ends at a clause boundary."""
+    if not text or not text.strip():
+        return False
+    return bool(_TRAILING_CLAUSE_BOUNDARY_RE.search(text))
 
 
 # ─── Language detection ──────────────────────────────────────────────

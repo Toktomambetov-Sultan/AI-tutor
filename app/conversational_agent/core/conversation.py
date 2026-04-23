@@ -21,6 +21,7 @@ from __future__ import annotations
 import io
 import logging
 import queue
+import re
 import threading
 from typing import Callable
 
@@ -46,10 +47,16 @@ from core.session_state import SessionState
 from core.utils import (
     detect_language,
     extract_text_from_lesson_context,
+    has_trailing_clause_boundary,
     split_clauses,
 )
 
 logger = logging.getLogger(__name__)
+
+_POSITIVE_TTS_HINT_RE = re.compile(
+    r"\\b(great|excellent|well done|nice work|good job|awesome|perfect)\\b",
+    re.IGNORECASE,
+)
 
 # Suppress Vosk's own logging (we log results ourselves)
 SetLogLevel(-1)
@@ -299,6 +306,29 @@ class ConversationalAgent:
     # TTS helper (unchanged engine, but per-sentence now)
     # ────────────────────────────────────────────────────────────
 
+    def _emotion_style_tts_text(self, sentence: str, lang: str) -> str:
+        """Apply lightweight prosody hints for English speech output only."""
+        if lang != "en":
+            return sentence
+
+        if not RUNTIME_CONFIG.tts.enable_emotion:
+            return sentence
+
+        text = sentence.strip()
+        if not text:
+            return sentence
+
+        strength = RUNTIME_CONFIG.tts.emotion_strength
+        extra_exclamations = 1 + int(strength * 2)
+
+        if _POSITIVE_TTS_HINT_RE.search(text) and text.endswith("."):
+            return text[:-1] + ("!" * extra_exclamations)
+
+        if text.endswith("!"):
+            return re.sub(r"!+$", "!" * extra_exclamations, text)
+
+        return text
+
     def _synthesise_sentence(self, sentence: str) -> bytes:
         """Return WAV bytes for a single sentence (English or Russian)."""
         lang = detect_language(sentence)
@@ -310,8 +340,9 @@ class ConversationalAgent:
             )
             sample_rate = self._resources.ru_sample_rate
         else:
+            tts_text = self._emotion_style_tts_text(sentence, lang)
             audio_tensor = self._resources.tts_model.generate_audio(
-                self._resources.voice_state, sentence
+                self._resources.voice_state, tts_text
             )
             sample_rate = self._resources.tts_model.sample_rate
 
@@ -418,6 +449,16 @@ class ConversationalAgent:
                 token = delta.content
                 buffer += token
                 full_reply += token
+
+                # Emit as soon as we have a complete trailing clause so
+                # first audio starts earlier without waiting for extra tokens.
+                if has_trailing_clause_boundary(buffer):
+                    for cl in split_clauses(buffer):
+                        if self._interrupted.is_set():
+                            break
+                        sentence_q.put(cl)
+                    buffer = ""
+                    continue
 
                 # Try to extract complete clauses from the buffer
                 clauses = split_clauses(buffer)

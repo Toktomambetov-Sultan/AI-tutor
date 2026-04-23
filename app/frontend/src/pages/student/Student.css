@@ -148,13 +148,46 @@
 
 /* ─── Lesson Viewer ─── */
 .lesson-viewer {
-    max-width: 800px;
+    width: 100%;
+    max-width: 1100px;
+}
+
+.lesson-viewer-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.lesson-topbar {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+}
+
+.lesson-columns {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+    gap: 1.25rem;
+    align-items: start;
+}
+
+.lesson-main-column {
+    min-width: 0;
+}
+
+.lesson-side-column {
+    position: sticky;
+    top: 84px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
 }
 
 .lesson-viewer h1 {
-    margin-bottom: 1.5rem;
-    padding-bottom: 1rem;
-    border-bottom: 1px solid var(--border);
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
 }
 
 .material-block {
@@ -202,17 +235,17 @@
 
 /* ─── AI Section ─── */
 .ai-section {
-    margin-top: 2.5rem;
-    padding: 2rem;
+    margin-top: 0;
+    padding: 1.25rem;
     background: linear-gradient(135deg, var(--primary-50), #f0f9ff);
     border: 1px solid var(--primary-200);
     border-radius: var(--radius-lg);
-    text-align: center;
+    text-align: left;
 }
 
 .ai-section-icon {
-    font-size: 2.5rem;
-    margin-bottom: 0.75rem;
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
 }
 
 .ai-section h3 {
@@ -223,7 +256,18 @@
 .ai-section p {
     color: var(--text-secondary);
     font-size: 0.875rem;
-    margin-bottom: 1rem;
+    margin-bottom: 0.875rem;
+}
+
+.lesson-stats-card h4 {
+    font-size: 0.9rem;
+    margin-bottom: 0.35rem;
+}
+
+.lesson-stats-card p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 0.86rem;
 }
 
 /* ─── Empty State ─── */
@@ -245,6 +289,14 @@
 
     .lesson-item {
         padding-left: 1.25rem;
+    }
+
+    .lesson-columns {
+        grid-template-columns: 1fr;
+    }
+
+    .lesson-side-column {
+        position: static;
     }
 }
 
