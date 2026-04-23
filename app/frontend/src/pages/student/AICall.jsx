@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../../store/authStore';
 import './AICall.css';
+import { getScheduledStartAt, getSubtitleDelayMs } from './audioSchedule';
 
 const STATUS = {
     IDLE: 'idle',
@@ -41,11 +42,16 @@ export default function AICall() {
     const canvasRef = useRef(null);
     const sourceNodeRef = useRef(null);
 
-    // ─── Audio playback queue (sentence-level) ───
+    // ─── Audio playback queue (sentence-level, smooth Web Audio scheduling) ───
     const audioQueueRef = useRef([]);       // [{wavData, aiText}]
     const isPlayingRef = useRef(false);
-    const currentAudioRef = useRef(null);   // currently playing Audio element
     const pendingAiTextRef = useRef('');    // text received before the next audio blob
+    const playbackContextRef = useRef(null);
+    const playbackMasterGainRef = useRef(null);
+    const playbackSourcesRef = useRef([]);
+    const playbackNextStartRef = useRef(0);
+    const playbackProcessingRef = useRef(false);
+    const subtitleTimersRef = useRef([]);
 
     // ─── Speech-level interrupt detection ───
     // Instead of naïve chunk-size check we sample the mic RMS via AnalyserNode.
@@ -55,6 +61,8 @@ export default function AICall() {
     const INTERRUPT_FRAMES_NEEDED = 3;       // consecutive frames above threshold
     const consecutiveSpeechRef = useRef(0);  // counter of consecutive loud frames
     const DUCK_DURATION_MS = 220;            // fade-out length for audio ducking
+    const AUDIO_CROSSFADE_SEC = 0.045;       // overlap adjacent sentence boundaries
+    const AUDIO_PREROLL_SEC = 0.02;          // schedule a little ahead of current time
 
     // ─── Duration timer ───
     useEffect(() => {
@@ -112,77 +120,149 @@ export default function AICall() {
         draw();
     }, []);
 
-    // ─── Play queued WAV audio responses sequentially (sentence-by-sentence) ───
-    const playNextInQueue = useCallback(() => {
-        if (isPlayingRef.current || audioQueueRef.current.length === 0) {
-            if (audioQueueRef.current.length === 0 && !isPlayingRef.current) {
-                setTurn(TURN.NONE);
-                setAiText('');
-            }
-            return;
+    const ensurePlaybackContext = useCallback(async () => {
+        if (!playbackContextRef.current) {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            const master = ctx.createGain();
+            master.gain.value = 1;
+            master.connect(ctx.destination);
+            playbackContextRef.current = ctx;
+            playbackMasterGainRef.current = master;
+            playbackNextStartRef.current = ctx.currentTime;
+        }
+        if (playbackContextRef.current.state === 'suspended') {
+            await playbackContextRef.current.resume();
+        }
+        return playbackContextRef.current;
+    }, []);
+
+    const stopPlaybackSmooth = useCallback((smooth = true) => {
+        const ctx = playbackContextRef.current;
+        const master = playbackMasterGainRef.current;
+        const sources = playbackSourcesRef.current;
+
+        subtitleTimersRef.current.forEach(timerId => clearTimeout(timerId));
+        subtitleTimersRef.current = [];
+
+        if (ctx && master && smooth) {
+            const now = ctx.currentTime;
+            const end = now + DUCK_DURATION_MS / 1000;
+            master.gain.cancelScheduledValues(now);
+            master.gain.setValueAtTime(master.gain.value, now);
+            master.gain.linearRampToValueAtTime(0, end);
+
+            setTimeout(() => {
+                sources.forEach(({ source }) => {
+                    try {
+                        source.stop();
+                    } catch {
+                        // already stopped
+                    }
+                });
+                playbackSourcesRef.current = [];
+                playbackNextStartRef.current = ctx.currentTime;
+                master.gain.setValueAtTime(1, ctx.currentTime);
+            }, DUCK_DURATION_MS + 10);
+        } else {
+            sources.forEach(({ source }) => {
+                try {
+                    source.stop();
+                } catch {
+                    // already stopped
+                }
+            });
+            playbackSourcesRef.current = [];
+            if (ctx) playbackNextStartRef.current = ctx.currentTime;
         }
 
-        isPlayingRef.current = true;
-        setTurn(TURN.AI);
-        const { wavData, aiText: sentenceText } = audioQueueRef.current.shift();
-        if (sentenceText) setAiText(sentenceText);
-
-        const blob = new Blob([wavData], { type: 'audio/wav' });
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        currentAudioRef.current = audio;
-
-        audio.onended = () => {
-            URL.revokeObjectURL(url);
-            currentAudioRef.current = null;
-            isPlayingRef.current = false;
-            playNextInQueue();
-        };
-        audio.onerror = () => {
-            URL.revokeObjectURL(url);
-            currentAudioRef.current = null;
-            isPlayingRef.current = false;
-            playNextInQueue();
-        };
-        audio.play().catch(() => {
-            currentAudioRef.current = null;
-            isPlayingRef.current = false;
-            playNextInQueue();
-        });
+        audioQueueRef.current = [];
+        playbackProcessingRef.current = false;
+        isPlayingRef.current = false;
+        pendingAiTextRef.current = '';
+        consecutiveSpeechRef.current = 0;
+        setAiText('');
     }, []);
+
+    const processAudioQueue = useCallback(async () => {
+        if (playbackProcessingRef.current) return;
+        playbackProcessingRef.current = true;
+
+        try {
+            const ctx = await ensurePlaybackContext();
+            const master = playbackMasterGainRef.current;
+            if (!ctx || !master) return;
+
+            while (audioQueueRef.current.length > 0) {
+                const { wavData, aiText: sentenceText } = audioQueueRef.current.shift();
+                const arrayBuffer = await wavData.arrayBuffer();
+                const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
+
+                const source = ctx.createBufferSource();
+                source.buffer = decoded;
+                const gain = ctx.createGain();
+                source.connect(gain);
+                gain.connect(master);
+
+                const startAt = getScheduledStartAt(
+                    ctx.currentTime,
+                    playbackNextStartRef.current,
+                    AUDIO_CROSSFADE_SEC,
+                    AUDIO_PREROLL_SEC
+                );
+                const endAt = startAt + decoded.duration;
+                const fadeIn = Math.min(AUDIO_CROSSFADE_SEC, decoded.duration / 3);
+                const fadeOut = Math.min(AUDIO_CROSSFADE_SEC, decoded.duration / 3);
+
+                gain.gain.setValueAtTime(0, startAt);
+                gain.gain.linearRampToValueAtTime(1, startAt + fadeIn);
+                gain.gain.setValueAtTime(1, Math.max(startAt + fadeIn, endAt - fadeOut));
+                gain.gain.linearRampToValueAtTime(0, endAt);
+
+                playbackSourcesRef.current.push({ source, endAt });
+                source.onended = () => {
+                    playbackSourcesRef.current = playbackSourcesRef.current.filter(
+                        s => s.source !== source
+                    );
+                    if (playbackSourcesRef.current.length === 0 && audioQueueRef.current.length === 0) {
+                        isPlayingRef.current = false;
+                        setTurn(TURN.NONE);
+                        setAiText('');
+                    }
+                };
+
+                if (sentenceText) {
+                    const subtitleDelayMs = getSubtitleDelayMs(startAt, ctx.currentTime);
+                    const timerId = setTimeout(() => {
+                        setAiText(sentenceText);
+                    }, subtitleDelayMs);
+                    subtitleTimersRef.current.push(timerId);
+                }
+                setTurn(TURN.AI);
+                isPlayingRef.current = true;
+
+                source.start(startAt);
+                playbackNextStartRef.current = endAt;
+            }
+        } catch {
+            isPlayingRef.current = false;
+        } finally {
+            playbackProcessingRef.current = false;
+            if (audioQueueRef.current.length > 0) {
+                processAudioQueue();
+            }
+        }
+    }, [ensurePlaybackContext, AUDIO_PREROLL_SEC, AUDIO_CROSSFADE_SEC]);
 
     // ─── Send interrupt signal with audio ducking ───
     const sendInterrupt = useCallback(() => {
-        // Audio ducking — smooth fade-out instead of abrupt stop
-        const audio = currentAudioRef.current;
-        if (audio) {
-            const startVol = audio.volume;
-            const steps = 10;
-            const stepMs = DUCK_DURATION_MS / steps;
-            let step = 0;
-            const fade = setInterval(() => {
-                step++;
-                audio.volume = Math.max(0, startVol * (1 - step / steps));
-                if (step >= steps) {
-                    clearInterval(fade);
-                    audio.pause();
-                    audio.volume = startVol; // reset for GC
-                    currentAudioRef.current = null;
-                }
-            }, stepMs);
-        }
-        // Clear queue
-        audioQueueRef.current = [];
-        isPlayingRef.current = false;
-        consecutiveSpeechRef.current = 0;
+        stopPlaybackSmooth(true);
         setTurn(TURN.STUDENT);
-        setAiText('');
 
         // Notify server
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify({ signal: 'interrupt' }));
         }
-    }, []);
+    }, [stopPlaybackSmooth]);
 
     // ─── Start call ───
     const startCall = useCallback(async () => {
@@ -236,31 +316,8 @@ export default function AICall() {
                             _startRecording(stream, ws);
                         }
                         if (msg.signal === 'interrupt') {
-                            // Fade out instead of hard-pausing to avoid mid-word cutoff
-                            const interruptAudio = currentAudioRef.current;
-                            if (interruptAudio && !interruptAudio.paused) {
-                                const startVol = interruptAudio.volume;
-                                const steps = 8;
-                                const stepMs = DUCK_DURATION_MS / steps;
-                                let step = 0;
-                                const fade = setInterval(() => {
-                                    step++;
-                                    interruptAudio.volume = Math.max(0, startVol * (1 - step / steps));
-                                    if (step >= steps) {
-                                        clearInterval(fade);
-                                        interruptAudio.pause();
-                                        interruptAudio.volume = startVol;
-                                        if (currentAudioRef.current === interruptAudio) {
-                                            currentAudioRef.current = null;
-                                        }
-                                    }
-                                }, stepMs);
-                            }
-                            audioQueueRef.current = [];
-                            isPlayingRef.current = false;
-                            pendingAiTextRef.current = '';
+                            stopPlaybackSmooth(true);
                             setTurn(TURN.STUDENT);
-                            setAiText('');
                         }
                         if (msg.ai_text) {
                             pendingAiTextRef.current = msg.ai_text;
@@ -271,7 +328,7 @@ export default function AICall() {
                     const sentenceText = pendingAiTextRef.current || '';
                     pendingAiTextRef.current = '';
                     audioQueueRef.current.push({ wavData: event.data, aiText: sentenceText });
-                    playNextInQueue();
+                    processAudioQueue();
                 }
             };
 
@@ -291,7 +348,7 @@ export default function AICall() {
             }
             setStatus(STATUS.ERROR);
         }
-    }, [lessonId, token, drawWaveform, playNextInQueue, status]);
+    }, [lessonId, token, drawWaveform, status, processAudioQueue, stopPlaybackSmooth]);
 
     // ─── Measure mic RMS from AnalyserNode (client-side speech detection) ───
     const getMicRMS = useCallback(() => {
@@ -355,19 +412,21 @@ export default function AICall() {
         if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
             audioContextRef.current.close();
         }
-        // Stop any playing audio
-        if (currentAudioRef.current) {
-            currentAudioRef.current.pause();
-            currentAudioRef.current = null;
+        // Stop scheduled TTS playback
+        stopPlaybackSmooth(false);
+        if (playbackContextRef.current && playbackContextRef.current.state !== 'closed') {
+            playbackContextRef.current.close();
+            playbackContextRef.current = null;
+            playbackMasterGainRef.current = null;
         }
-        audioQueueRef.current = [];
-        isPlayingRef.current = false;
+        subtitleTimersRef.current.forEach(timerId => clearTimeout(timerId));
+        subtitleTimersRef.current = [];
 
         setStatus(STATUS.IDLE);
         setAudioLevel(0);
         setTurn(TURN.NONE);
         setAiText('');
-    }, []);
+    }, [stopPlaybackSmooth]);
 
     // ─── Toggle mute ───
     const toggleMute = useCallback(() => {

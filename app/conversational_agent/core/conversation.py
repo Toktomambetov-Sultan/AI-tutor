@@ -30,12 +30,14 @@ from openai import OpenAI
 from vosk import KaldiRecognizer, Model as VoskModel, SetLogLevel
 
 from core.audio_processor import TARGET_SAMPLE_RATE, RealtimeAudioProcessor
+from core.config import RUNTIME_CONFIG
 from core.lesson_manager import LessonManager
 from core.pipeline import LLMPipeline
 from core.prompts import (
     FALLBACK_SYSTEM_PROMPT,
     INTERRUPT_CONTEXT_TEMPLATE,
     OPENING_GREETING_INSTRUCTION,
+    VOICE_STYLE_GUARDRAIL,
 )
 from core.protocol import MessageType, QueueMessage
 from core.rag import LessonRAG
@@ -125,7 +127,10 @@ class ConversationalAgent:
         else:
             self.context = FALLBACK_SYSTEM_PROMPT
 
-        self.messages: list[dict] = [{"role": "system", "content": self.context}]
+        self.messages: list[dict] = [
+            {"role": "system", "content": self.context},
+            {"role": "system", "content": VOICE_STYLE_GUARDRAIL},
+        ]
 
     def _init_session_state(self):
         """Initialise per-session mutable state (interrupts, turn tracking)."""
@@ -238,7 +243,7 @@ class ConversationalAgent:
         )
         try:
             resp = self._resources.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=RUNTIME_CONFIG.llm.summary_model,
                 messages=[
                     {
                         "role": "system",
@@ -388,9 +393,14 @@ class ConversationalAgent:
 
         # ── Stream LLM tokens (producer) ──
         stream = self._resources.openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=RUNTIME_CONFIG.llm.model,
             messages=messages,
             stream=True,
+            temperature=RUNTIME_CONFIG.llm.temperature,
+            top_p=RUNTIME_CONFIG.llm.top_p,
+            presence_penalty=RUNTIME_CONFIG.llm.presence_penalty,
+            frequency_penalty=RUNTIME_CONFIG.llm.frequency_penalty,
+            max_tokens=RUNTIME_CONFIG.llm.max_tokens,
         )
 
         buffer = ""  # accumulates tokens until a clause boundary

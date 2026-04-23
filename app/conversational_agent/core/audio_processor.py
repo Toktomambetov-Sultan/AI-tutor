@@ -15,9 +15,12 @@ import json
 import logging
 import subprocess
 import threading
+from collections import deque
 
 import numpy as np
 import torch
+
+from core.config import RUNTIME_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,8 @@ def _ensure_silero_model():
         if _silero_model is not None:
             return
         logger.info("Loading Silero VAD model …")
+        # Keep one inference thread for predictable low-latency streaming.
+        torch.set_num_threads(RUNTIME_CONFIG.audio.torch_num_threads)
         model, utils = torch.hub.load(
             repo_or_dir="snakers4/silero-vad",
             model="silero_vad",
@@ -71,11 +76,11 @@ class RealtimeAudioProcessor:
         self,
         on_utterance: "callable",
         sample_rate: int = TARGET_SAMPLE_RATE,
-        silence_sec: float = 1.0,
-        min_silence_sec: float = 0.5,
-        max_silence_sec: float = 1.2,
-        vad_threshold: float = 0.45,
-        min_speech_sec: float = 0.5,
+        silence_sec: float = RUNTIME_CONFIG.audio.silence_sec,
+        min_silence_sec: float = RUNTIME_CONFIG.audio.min_silence_sec,
+        max_silence_sec: float = RUNTIME_CONFIG.audio.max_silence_sec,
+        vad_threshold: float = RUNTIME_CONFIG.audio.vad_threshold,
+        min_speech_sec: float = RUNTIME_CONFIG.audio.min_speech_sec,
         recognizer=None,
     ):
         _ensure_silero_model()
@@ -93,11 +98,24 @@ class RealtimeAudioProcessor:
 
         self.vad_threshold = vad_threshold
         self.min_speech_bytes = int(min_speech_sec * sample_rate * BYTES_PER_SAMPLE)
+        self._silence_sec_with_partial_text = (
+            RUNTIME_CONFIG.audio.silence_sec_with_partial_text
+        )
+        self._max_utterance_sec = RUNTIME_CONFIG.audio.max_utterance_sec
 
         self._alive = True
         self._pcm_buf = bytearray()
         self._is_speaking = False
         self._silence_frames = 0
+        self._pre_speech_chunks = deque(maxlen=RUNTIME_CONFIG.audio.pre_speech_chunks)
+        self._latest_partial_text = ""
+        self._speech_frames = 0
+
+        if self._recognizer is not None:
+            if hasattr(self._recognizer, "SetWords"):
+                self._recognizer.SetWords(True)
+            if hasattr(self._recognizer, "SetMaxAlternatives"):
+                self._recognizer.SetMaxAlternatives(0)
 
         # Persistent ffmpeg
         self._proc = subprocess.Popen(
@@ -216,6 +234,71 @@ class RealtimeAudioProcessor:
             prob = _silero_model(tensor, self.sample_rate).item()
         return prob
 
+    @staticmethod
+    def _pick_transcript_text(final_text: str, partial_text: str) -> str:
+        """Prefer final recognizer output, but keep useful partial fallback."""
+        final_text = (final_text or "").strip()
+        if final_text:
+            return final_text
+        return (partial_text or "").strip()
+
+    def _effective_silence_sec(self) -> float:
+        """Lower silence wait when recognizer already produced partial text."""
+        if self._latest_partial_text:
+            return min(self.silence_sec, self._silence_sec_with_partial_text)
+        return self.silence_sec
+
+    def _silence_frames_needed(self, chunk_duration_sec: float) -> int:
+        return max(1, int(self._effective_silence_sec() / chunk_duration_sec))
+
+    def _should_force_finalize(self, chunk_duration_sec: float) -> bool:
+        """Fast finalize only after silence starts for long utterances."""
+        speech_sec = self._speech_frames * chunk_duration_sec
+        return (
+            self._silence_frames > 0
+            and bool(self._latest_partial_text)
+            and speech_sec >= self._max_utterance_sec
+            and len(self._pcm_buf)
+            >= min(
+                self.min_speech_bytes,
+                chunk_duration_sec * self.sample_rate * BYTES_PER_SAMPLE,
+            )
+        )
+
+    def _finalize_utterance(self, frames_read: int, reason: str):
+        pcm_len = len(self._pcm_buf)
+        self._pcm_buf = bytearray()
+        self._is_speaking = False
+        self._silence_frames = 0
+        self._speech_frames = 0
+
+        if pcm_len < self.min_speech_bytes:
+            logger.debug("VAD: utterance too short, discarding (%s)", reason)
+            if self._recognizer:
+                self._recognizer.FinalResult()
+            self._latest_partial_text = ""
+            return
+
+        duration = pcm_len / (self.sample_rate * BYTES_PER_SAMPLE)
+        if self._recognizer:
+            result = json.loads(self._recognizer.FinalResult())
+            text = self._pick_transcript_text(
+                result.get("text", ""), self._latest_partial_text
+            )
+        else:
+            text = ""
+        self._latest_partial_text = ""
+
+        logger.info(
+            "VAD: utterance detected (%.1fs of PCM) at frame %d (%s) — text: %s",
+            duration,
+            frames_read,
+            reason,
+            text[:120] if text else "(empty)",
+        )
+        self._adapt_silence_threshold(pcm_len)
+        self.on_utterance(text)
+
     def _read_loop(self):
         """Read decoded PCM from ffmpeg stdout and run Silero VAD."""
         CHUNK_SAMPLES = 512  # 32 ms at 16 kHz  (Silero requires exactly 512 @ 16k)
@@ -245,12 +328,13 @@ class RealtimeAudioProcessor:
                 del read_buf[:CHUNK_BYTES]
 
                 frames_read += 1
+                self._pre_speech_chunks.append(data)
 
                 # ── Silero VAD ──
                 speech_prob = self._run_silero_vad(data)
 
                 # Adaptive: recalculate silence frames based on current silence_sec
-                silence_frames_needed = int(self.silence_sec / CHUNK_DURATION_SEC)
+                silence_frames_needed = self._silence_frames_needed(CHUNK_DURATION_SEC)
 
                 if frames_read % 50 == 0:
                     logger.debug(
@@ -271,11 +355,39 @@ class RealtimeAudioProcessor:
                             frames_read,
                             speech_prob,
                         )
-                    self._is_speaking = True
-                    self._silence_frames = 0
-                    self._pcm_buf.extend(data)
-                    if self._recognizer:
-                        self._recognizer.AcceptWaveform(data)
+                        self._is_speaking = True
+                        self._silence_frames = 0
+                        self._speech_frames = 0
+                        self._latest_partial_text = ""
+                        self._pcm_buf = bytearray()
+
+                        # Include a small pre-roll so the utterance start is not clipped.
+                        for pre_chunk in self._pre_speech_chunks:
+                            self._pcm_buf.extend(pre_chunk)
+                            if self._recognizer:
+                                self._recognizer.AcceptWaveform(pre_chunk)
+                        self._pre_speech_chunks.clear()
+                    else:
+                        self._silence_frames = 0
+                        self._pcm_buf.extend(data)
+                        if self._recognizer:
+                            self._recognizer.AcceptWaveform(data)
+
+                    self._speech_frames += 1
+                    if (
+                        self._recognizer
+                        and self._speech_frames
+                        % max(1, RUNTIME_CONFIG.audio.partial_update_every_frames)
+                        == 0
+                    ):
+                        try:
+                            partial = json.loads(self._recognizer.PartialResult())
+                            candidate = (partial.get("partial") or "").strip()
+                            if candidate:
+                                self._latest_partial_text = candidate
+                        except Exception:
+                            pass
+
                 elif self._is_speaking:
                     # ── silence while we were speaking ──
                     self._pcm_buf.extend(data)
@@ -290,36 +402,14 @@ class RealtimeAudioProcessor:
                             speech_prob,
                         )
 
+                    if self._should_force_finalize(CHUNK_DURATION_SEC):
+                        self._finalize_utterance(
+                            frames_read, reason="max_utterance_timeout"
+                        )
+                        continue
+
                     if self._silence_frames >= silence_frames_needed:
-                        pcm_len = len(self._pcm_buf)
-                        self._pcm_buf = bytearray()
-                        self._is_speaking = False
-                        self._silence_frames = 0
-
-                        if pcm_len >= self.min_speech_bytes:
-                            duration = pcm_len / (self.sample_rate * BYTES_PER_SAMPLE)
-                            # ── Get transcription from Vosk ──
-                            if self._recognizer:
-                                result = json.loads(self._recognizer.FinalResult())
-                                text = result.get("text", "")
-                            else:
-                                text = ""
-
-                            logger.info(
-                                "VAD: utterance detected (%.1fs of PCM) "
-                                "at frame %d — text: %s",
-                                duration,
-                                frames_read,
-                                text[:120] if text else "(empty)",
-                            )
-                            # ── Adapt silence for next utterance ──
-                            self._adapt_silence_threshold(pcm_len)
-                            self.on_utterance(text)
-                        else:
-                            logger.debug("VAD: utterance too short, discarding")
-                            # Reset recognizer for discarded utterance
-                            if self._recognizer:
-                                self._recognizer.FinalResult()
+                        self._finalize_utterance(frames_read, reason="silence_boundary")
                 # else: silence before any speech — ignore
 
             except Exception as e:
