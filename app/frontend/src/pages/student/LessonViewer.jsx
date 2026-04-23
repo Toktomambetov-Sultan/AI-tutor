@@ -1,10 +1,12 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useParams, useNavigate } from 'react-router-dom';
 import api from '../../api/axios';
 import './Student.css';
 
 export default function LessonViewer() {
     const { id: courseId, lessonId } = useParams();
+    const { t } = useTranslation();
     const navigate = useNavigate();
     const [lesson, setLesson] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -17,7 +19,7 @@ export default function LessonViewer() {
             const response = await api.get(`/lessons/${lessonId}`);
             setLesson(response.data);
         } catch (err) {
-            setError(err.response?.data?.detail || 'Failed to fetch lesson');
+            setError(err.response?.data?.detail || t('student.lessonNotFound'));
         } finally {
             setLoading(false);
         }
@@ -27,15 +29,15 @@ export default function LessonViewer() {
         navigate(`/courses/${courseId}/lessons/${lessonId}/call`);
     };
 
-    if (loading) return <div className="loading-state"><div className="spinner" /><span>Loading lesson...</span></div>;
-    if (!lesson) return <div className="alert alert-error">{error || 'Lesson not found'}</div>;
+    if (loading) return <div className="loading-state"><div className="spinner" /><span>{t('student.loadingLesson')}</span></div>;
+    if (!lesson) return <div className="alert alert-error">{error || t('student.lessonNotFound')}</div>;
 
     return (
         <div className="lesson-viewer lesson-viewer-layout">
             <div className="lesson-topbar">
                 <button className="btn-back" onClick={() => navigate(`/courses/${courseId}`)}>
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                    Back to Course
+                    {t('student.backToCourse')}
                 </button>
                 <h1>{lesson.title}</h1>
             </div>
@@ -45,18 +47,23 @@ export default function LessonViewer() {
                     {!lesson.materials?.length ? (
                         <div className="empty-state-card" style={{ marginTop: '1rem' }}>
                             <div className="empty-icon">📝</div>
-                            <h3>No materials yet</h3>
-                            <p>The teacher hasn't added content to this lesson yet.</p>
+                            <h3>{t('student.noMaterialsYet')}</h3>
+                            <p>{t('student.noMaterialsYetText')}</p>
                         </div>
                     ) : (
                         lesson.materials.map((material, index) => (
                             <div key={material.id} className="card material-block">
                                 <h3>
-                                    {material.type === 'text' ? 'Text material' : 'PDF document'}
+                                    {material.type === 'text' ? t('student.textMaterial') : t('student.pdfDocument')}
                                     {lesson.materials.length > 1 && ` #${index + 1}`}
                                 </h3>
                                 {material.type === 'text' ? (
-                                    <div className="text-content">{material.content}</div>
+                                    <button
+                                        className="btn-secondary"
+                                        onClick={() => navigate(`/courses/${courseId}/lessons/${lessonId}/material/${material.id}`)}
+                                    >
+                                        {t('student.viewMaterial')}
+                                    </button>
                                 ) : (
                                     <a
                                         href={`/api/v1/materials/${material.id}`}
@@ -64,7 +71,7 @@ export default function LessonViewer() {
                                         rel="noopener noreferrer"
                                         className="pdf-link"
                                     >
-                                        Open PDF
+                                        {t('student.openPdf')}
                                     </a>
                                 )}
                             </div>
@@ -75,16 +82,16 @@ export default function LessonViewer() {
                 <aside className="lesson-side-column">
                     <div className="ai-section">
                         <div className="ai-section-icon">🤖</div>
-                        <h3>AI Tutor</h3>
-                        <p>Start a live voice session that follows this lesson content.</p>
+                        <h3>{t('student.aiTutor')}</h3>
+                        <p>{t('student.aiTutorText')}</p>
                         <button className="btn-primary" onClick={handleAiCall}>
-                            Start Voice Session
+                            {t('student.startVoiceSession')}
                         </button>
                     </div>
 
                     <div className="card lesson-stats-card">
-                        <h4>Lesson Snapshot</h4>
-                        <p>{lesson.materials?.length || 0} materials ready</p>
+                        <h4>{t('student.lessonSnapshot')}</h4>
+                        <p>{t('student.materialsReady', { count: lesson.materials?.length || 0 })}</p>
                     </div>
                 </aside>
             </div>

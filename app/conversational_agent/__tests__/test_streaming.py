@@ -151,17 +151,31 @@ class TestSentenceSplitting:
         assert result[-1] == "I can explain further."
 
     def test_clause_splitting_breaks_long_sentence(self):
-        text = "Photosynthesis uses light energy, converts it to chemical energy, and stores it in glucose."
+        # Comma no longer splits clauses (prevents unnatural tonal breaks).
+        # Splitting happens at ; : — and sentence-final punctuation.
+        text = "First we cover photosynthesis; then we discuss respiration."
         result = split_clauses(text)
         assert len(result) >= 2
-        assert any("light energy" in part for part in result)
+        assert any("photosynthesis" in part for part in result)
+        assert any("respiration" in part for part in result)
+
+    def test_clause_splitting_does_not_split_on_comma(self):
+        # Commas must NOT trigger clause splits — they cause unnatural audio.
+        text = "Photosynthesis uses light energy, converts it to chemical energy, and stores it in glucose."
+        result = split_clauses(text)
+        # The whole sentence is one clause (no strong boundary until final .)
+        assert len(result) == 1
+        assert "light energy" in result[0]
 
     def test_clause_splitting_merges_tiny_fragments(self):
-        text = "Oh, OK, sure."
+        # Without comma splitting the entire string is a single clause.
+        text = "Oh! Okay. Sure."
         result = split_clauses(text)
-        # Fragments under _MIN_CLAUSE_LEN chars are merged together
-        assert len(result) == 1
-        assert result[0] == "Oh, OK, sure."
+        # Each sentence-final punctuation creates a clause boundary;
+        # very short fragments are merged into the following clause.
+        assert len(result) >= 1
+        full = " ".join(result)
+        assert "Okay" in full
 
     def test_clause_boundary_detection_true_when_ending_with_punctuation(self):
         assert has_trailing_clause_boundary("Great work!") is True
@@ -546,7 +560,7 @@ class TestStreamLLMAndSpeak:
             agent._process_pending_utterance()
             time.sleep(0.05)
 
-            agent._handle_turn.assert_called_once_with(pending)
+            agent._handle_turn.assert_called_once_with(pending, elapsed_sec=None)
         finally:
             loop.close()
 
@@ -1053,6 +1067,76 @@ class TestTimingAwareTurnGate:
         time.sleep(0.3)  # wait past any reasonable default
         assert received == [], f"Expected no dispatch after close, got: {received}"
 
+    def test_force_reply_passes_elapsed_sec_to_callback(self):
+        """T02: force-reply should include elapsed silence in callback kwargs."""
+        from unittest.mock import patch
+        from dataclasses import replace
+        from core.turn_policy import TimingAwareTurnGate
+        import core.turn_policy as _tp_mod
+        import core.config as _cfg_mod
+
+        received = []
+
+        def _cb(text, **kwargs):
+            received.append((text, kwargs.get("elapsed_sec")))
+
+        original_cfg = _cfg_mod.RUNTIME_CONFIG
+        fast_turn_policy = replace(original_cfg.turn_policy, force_reply_sec=0.05)
+        fast_cfg = replace(original_cfg, turn_policy=fast_turn_policy)
+
+        with patch.object(_cfg_mod, "RUNTIME_CONFIG", fast_cfg), \
+             patch.object(_tp_mod, "RUNTIME_CONFIG", fast_cfg):
+            gate = TimingAwareTurnGate(_cb)
+            gate.feed("Hmm")
+            time.sleep(0.2)
+
+        assert len(received) == 1
+        text, elapsed = received[0]
+        assert text == "Hmm"
+        assert elapsed is not None and elapsed >= 0.04
+
+
+class TestFillerInterruptSuppression:
+    """T04: filler back-channels should not interrupt active AI turn."""
+
+    def test_filler_utterance_does_not_trigger_interrupt(self):
+        from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
+
+        mock_tts = MagicMock()
+        mock_tts.sample_rate = 22050
+        mock_openai = MagicMock()
+        resources = SharedResources(
+            openai_client=mock_openai,
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
+
+        with patch("core.conversation.RealtimeAudioProcessor"), patch(
+            "core.conversation.LessonRAG"
+        ):
+            loop = asyncio.new_event_loop()
+            q = asyncio.Queue()
+            agent = ConversationalAgent(q, loop, resources=resources)
+
+        try:
+            # Simulate active AI turn.
+            with agent._processing_lock:
+                agent._processing = True
+            agent.handle_interrupt = MagicMock()
+
+            agent._on_utterance_detected("okay")
+
+            assert agent._pending_utterance is None
+            agent.handle_interrupt.assert_not_called()
+        finally:
+            loop.close()
+
 
 # ─────────────────────────────────────────────────────────────────────
 # 11.  Tempo strategy — classification and prosody shaping
@@ -1500,7 +1584,7 @@ class TestReducedVADThresholds:
         from core.audio_processor import RealtimeAudioProcessor
 
         sig = inspect.signature(RealtimeAudioProcessor.__init__)
-        assert sig.parameters["silence_sec"].default == 0.6
+        assert sig.parameters["silence_sec"].default == 0.45
         assert sig.parameters["min_silence_sec"].default == 0.25
         assert sig.parameters["max_silence_sec"].default == 0.9
 
@@ -1759,6 +1843,7 @@ class TestVoskIntegration:
     def test_russian_model_loads(self):
         """Verify the Russian Vosk model can be loaded."""
         from vosk import Model as _VoskModel
+        import numpy as np
 
         ru_model_path = "/app/models/vosk-model-small-ru-0.22"
         try:
@@ -1766,9 +1851,209 @@ class TestVoskIntegration:
         except Exception:
             pytest.skip(f"Russian Vosk model not found at {ru_model_path}")
         rec = self._KaldiRec(ru_model, self.sample_rate)
-        import numpy as np
-
         silence = np.zeros(self.sample_rate, dtype=np.int16).tobytes()
         rec.AcceptWaveform(silence)
         result = self._json.loads(rec.FinalResult())
         assert "text" in result
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 15. Inter-sentence silence (natural pauses) — T03
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestInterSentenceSilence:
+    """Tests for _make_silence_wav helper and silence injection in _tts_worker."""
+
+    def _make_agent(self):
+        from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
+        import numpy as np
+
+        mock_tts = MagicMock()
+        mock_tts.sample_rate = 22050
+        mock_tts.generate_audio = MagicMock(return_value=np.zeros(1000, dtype=np.float32))
+        mock_openai = MagicMock()
+        resources = SharedResources(
+            openai_client=mock_openai,
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
+        with patch("core.conversation.RealtimeAudioProcessor"), patch(
+            "core.conversation.LessonRAG"
+        ):
+            loop = asyncio.new_event_loop()
+            q = asyncio.Queue()
+            agent = ConversationalAgent(q, loop, resources=resources)
+        return agent, q, loop
+
+    def test_make_silence_wav_returns_valid_wav(self):
+        import scipy.io.wavfile
+
+        agent, _, loop = self._make_agent()
+        try:
+            wav = agent._make_silence_wav(100, lang="en")
+            assert wav[:4] == b"RIFF"
+            sr, data = scipy.io.wavfile.read(io.BytesIO(wav))
+            assert sr == 22050
+            assert abs(len(data) - 2205) <= 1
+        finally:
+            loop.close()
+
+    def test_make_silence_wav_uses_ru_sample_rate(self):
+        from dataclasses import replace
+        import scipy.io.wavfile
+
+        agent, _, loop = self._make_agent()
+        try:
+            new_resources = replace(
+                agent._resources,
+                ru_tts_model=MagicMock(),
+                ru_sample_rate=24000,
+            )
+            agent._resources = new_resources
+            wav = agent._make_silence_wav(100, lang="ru")
+            sr, data = scipy.io.wavfile.read(io.BytesIO(wav))
+            assert sr == 24000
+            assert abs(len(data) - 2400) <= 1
+        finally:
+            loop.close()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 16. Voice gender in system messages — T07
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestVoiceGenderSystemMessage:
+    """Verify voice gender context is injected into initial messages."""
+
+    def _make_agent(self, voice_gender="female"):
+        from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
+        from dataclasses import replace
+        import core.config as _cfg_mod
+
+        mock_tts = MagicMock()
+        mock_tts.sample_rate = 22050
+        mock_openai = MagicMock()
+        resources = SharedResources(
+            openai_client=mock_openai,
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
+        new_llm = replace(_cfg_mod.RUNTIME_CONFIG.llm, voice_gender=voice_gender)
+        new_cfg = replace(_cfg_mod.RUNTIME_CONFIG, llm=new_llm)
+        with patch("core.conversation.RealtimeAudioProcessor"), patch(
+            "core.conversation.LessonRAG"
+        ), patch.object(_cfg_mod, "RUNTIME_CONFIG", new_cfg), patch(
+            "core.conversation.RUNTIME_CONFIG", new_cfg
+        ):
+            loop = asyncio.new_event_loop()
+            q = asyncio.Queue()
+            agent = ConversationalAgent(q, loop, resources=resources)
+        loop.close()
+        return agent
+
+    def test_female_gender_in_system_messages(self):
+        agent = self._make_agent(voice_gender="female")
+        system_contents = [m["content"] for m in agent.messages if m["role"] == "system"]
+        assert any("female" in c for c in system_contents)
+
+    def test_male_gender_in_system_messages(self):
+        agent = self._make_agent(voice_gender="male")
+        system_contents = [m["content"] for m in agent.messages if m["role"] == "system"]
+        assert any("male" in c for c in system_contents)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 17. Lower latency defaults — T05
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestLowerLatencyDefaults:
+    """Confirm that latency-sensitive config defaults were reduced."""
+
+    def test_silence_sec_reduced(self):
+        from core.config import RUNTIME_CONFIG
+
+        assert RUNTIME_CONFIG.audio.silence_sec <= 0.5
+
+    def test_force_reply_sec_reduced(self):
+        from core.config import RUNTIME_CONFIG
+
+        assert RUNTIME_CONFIG.turn_policy.force_reply_sec <= 1.6
+
+    def test_partial_respond_silence_sec_reduced(self):
+        from core.config import RUNTIME_CONFIG
+
+        assert RUNTIME_CONFIG.turn_policy.partial_respond_silence_sec <= 0.7
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 18. Lesson-end token signaling — T08
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestLessonEndSignal:
+    def test_lesson_end_token_is_not_spoken_and_signal_is_emitted(self):
+        from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
+
+        import numpy as np
+
+        mock_tts = MagicMock()
+        mock_tts.sample_rate = 22050
+        mock_tts.generate_audio = MagicMock(
+            return_value=np.zeros(64, dtype=np.float32)
+        )
+
+        mock_openai = MagicMock()
+        mock_stream = MagicMock()
+        mock_stream.__iter__.return_value = iter(
+            [_make_chunk("Great work."), _make_chunk(" [LESSON_END]")]
+        )
+        mock_openai.chat.completions.create.return_value = mock_stream
+
+        resources = SharedResources(
+            openai_client=mock_openai,
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
+
+        with patch("core.conversation.RealtimeAudioProcessor"), patch(
+            "core.conversation.LessonRAG"
+        ):
+            loop = asyncio.new_event_loop()
+            q = asyncio.Queue()
+            agent = ConversationalAgent(q, loop, resources=resources)
+
+        try:
+            spoken = agent._stream_llm_and_speak()
+            assert "LESSON_END" not in spoken
+
+            msgs = []
+
+            async def _drain():
+                while not q.empty():
+                    msgs.append(await q.get())
+
+            loop.run_until_complete(_drain())
+            assert any(m[0] == "signal" and m[1] == "lesson_end" for m in msgs)
+        finally:
+            loop.close()

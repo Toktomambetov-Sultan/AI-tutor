@@ -494,43 +494,105 @@
     }
 }
 
+/* Lesson completion status */
+.ai-call-complete-banner {
+    width: min(100%, 420px);
+    margin-bottom: 1rem;
+    background: rgba(16, 185, 129, 0.16);
+    border: 1px solid rgba(16, 185, 129, 0.4);
+    color: #bbf7d0;
+    padding: 0.625rem 0.85rem;
+    border-radius: 10px;
+    font-size: 0.875rem;
+}
+
 /* ─── Responsive ─── */
 @media (max-width: 480px) {
+    .ai-call-page {
+        overflow-y: auto;
+        padding: 0.75rem;
+    }
+
     .ai-call-container {
-        padding: 1.5rem;
+        width: 100%;
+        max-width: 100%;
+        padding: 1rem 0.75rem 1.5rem;
+    }
+
+    .ai-call-back {
+        position: static;
+        align-self: flex-start;
+        margin-bottom: 0.75rem;
+        font-size: 0.8125rem;
     }
 
     .ai-avatar-wrapper {
-        width: 120px;
-        height: 120px;
+        width: 112px;
+        height: 112px;
+        margin-bottom: 1.1rem;
     }
 
     .ai-avatar {
-        width: 80px;
-        height: 80px;
+        width: 76px;
+        height: 76px;
     }
 
     .ai-avatar svg {
-        width: 36px;
-        height: 36px;
+        width: 34px;
+        height: 34px;
     }
 
     .ai-call-title {
-        font-size: 1.125rem;
+        font-size: 1rem;
+    }
+
+    .ai-call-subtitle {
+        width: 100%;
+        max-width: 100%;
+        font-size: 0.875rem;
+        line-height: 1.45;
+        padding: 0.5rem 0.75rem;
     }
 
     .ai-waveform-container {
-        width: 260px;
-        height: 60px;
+        width: 100%;
+        max-width: 280px;
+        height: 56px;
+        margin: 0.75rem 0 1rem;
+    }
+
+    .ai-call-controls {
+        width: 100%;
+        flex-wrap: wrap;
+        gap: 0.9rem;
     }
 
     .ai-call-btn.call-start {
-        padding: 0.75rem 1.5rem;
-        font-size: 0.9375rem;
+        width: 100%;
+        justify-content: center;
+        padding: 0.75rem 1rem;
+        font-size: 0.875rem;
+    }
+
+    .ai-call-active-controls {
+        width: 100%;
+        justify-content: center;
+        gap: 1.1rem;
+        padding-bottom: 1.5rem;
     }
 
     .ai-ctrl-btn {
-        width: 60px;
-        height: 60px;
+        width: 58px;
+        height: 58px;
+    }
+
+    .ctrl-label {
+        bottom: -1.25rem;
+        font-size: 0.625rem;
+    }
+
+    .ai-call-info-badge {
+        margin-top: 1.2rem;
+        font-size: 0.6875rem;
     }
 }

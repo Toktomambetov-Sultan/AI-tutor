@@ -24,11 +24,28 @@ class SharedResources:
     vosk_model_ru: VoskModel | None
 
 
+_ALBA_SAFETENSORS_PATH = os.environ.get(
+    "VOICE_STATE_PATH", "/app/models/voice_states/alba.safetensors"
+)
+
+
 def load_en_tts() -> tuple[TTSModel, object]:
-    """Load the English PocketTTS model and voice state."""
+    """Load the English PocketTTS model and voice state.
+
+    If a pre-exported safetensors voice state exists (baked into the Docker
+    image at build time) it is loaded directly — this is much faster than
+    re-processing the audio prompt on every container start.
+    """
     logger.info("Loading English TTS model ...")
     tts_model = TTSModel.load_model()
-    voice_state = tts_model.get_state_for_audio_prompt("alba")
+    if os.path.exists(_ALBA_SAFETENSORS_PATH):
+        logger.info(
+            "Loading pre-cached voice state from %s", _ALBA_SAFETENSORS_PATH
+        )
+        voice_state = tts_model.get_state_for_audio_prompt(_ALBA_SAFETENSORS_PATH)
+    else:
+        logger.info("Pre-cached voice state not found; deriving from audio prompt.")
+        voice_state = tts_model.get_state_for_audio_prompt("alba")
     logger.info("English TTS model loaded.")
     return tts_model, voice_state
 

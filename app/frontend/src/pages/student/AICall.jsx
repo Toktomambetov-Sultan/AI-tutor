@@ -22,7 +22,7 @@ const TURN = {
 const MEDIA_RECORDER_CHUNK_MS = 180;
 
 export default function AICall() {
-    const { lessonId } = useParams();
+    const { id: courseId, lessonId } = useParams();
     const navigate = useNavigate();
     const { token } = useAuthStore();
 
@@ -33,6 +33,7 @@ export default function AICall() {
     const [audioLevel, setAudioLevel] = useState(0);
     const [turn, setTurn] = useState(TURN.NONE);
     const [aiText, setAiText] = useState('');          // current sentence AI is saying
+    const [lessonCompleteNotice, setLessonCompleteNotice] = useState('');
 
     const wsRef = useRef(null);
     const mediaStreamRef = useRef(null);
@@ -54,6 +55,7 @@ export default function AICall() {
     const playbackNextStartRef = useRef(0);
     const playbackProcessingRef = useRef(false);
     const subtitleTimersRef = useRef([]);
+    const lessonEndTimerRef = useRef(null);
 
     // ─── Speech-level interrupt detection ───
     // Instead of naïve chunk-size check we sample the mic RMS via AnalyserNode.
@@ -321,6 +323,18 @@ export default function AICall() {
                             stopPlaybackSmooth(true);
                             setTurn(TURN.STUDENT);
                         }
+                        if (msg.signal === 'lesson_end') {
+                            stopPlaybackSmooth(true);
+                            setTurn(TURN.NONE);
+                            setAiText('');
+                            setLessonCompleteNotice('Lesson complete. Returning to lesson page...');
+                            if (lessonEndTimerRef.current) {
+                                clearTimeout(lessonEndTimerRef.current);
+                            }
+                            lessonEndTimerRef.current = setTimeout(() => {
+                                navigate(`/courses/${courseId}/lessons/${lessonId}`);
+                            }, 2000);
+                        }
                         if (msg.ai_text) {
                             pendingAiTextRef.current = msg.ai_text;
                         }
@@ -350,7 +364,7 @@ export default function AICall() {
             }
             setStatus(STATUS.ERROR);
         }
-    }, [lessonId, token, drawWaveform, status, processAudioQueue, stopPlaybackSmooth]);
+    }, [lessonId, token, drawWaveform, status, processAudioQueue, stopPlaybackSmooth, navigate, courseId]);
 
     // ─── Measure mic RMS from AnalyserNode (client-side speech detection) ───
     const getMicRMS = useCallback(() => {
@@ -424,11 +438,16 @@ export default function AICall() {
         }
         subtitleTimersRef.current.forEach(timerId => clearTimeout(timerId));
         subtitleTimersRef.current = [];
+        if (lessonEndTimerRef.current) {
+            clearTimeout(lessonEndTimerRef.current);
+            lessonEndTimerRef.current = null;
+        }
 
         setStatus(STATUS.IDLE);
         setAudioLevel(0);
         setTurn(TURN.NONE);
         setAiText('');
+        setLessonCompleteNotice('');
     }, [stopPlaybackSmooth]);
 
     // ─── Toggle mute ───
@@ -511,6 +530,10 @@ export default function AICall() {
                     <div className="ai-call-error">
                         <span>⚠️</span> {errorMsg}
                     </div>
+                )}
+
+                {lessonCompleteNotice && (
+                    <div className="ai-call-complete-banner">{lessonCompleteNotice}</div>
                 )}
 
                 {/* Idle state description */}

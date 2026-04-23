@@ -1,9 +1,11 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import api from '../../api/axios';
 import './Admin.css';
 
 export default function UserManagement() {
+    const { t } = useTranslation();
     const [users, setUsers] = useState([]);
     const [total, setTotal] = useState(0);
     const [roleFilter, setRoleFilter] = useState('');
@@ -21,7 +23,7 @@ export default function UserManagement() {
             setUsers(response.data.users);
             setTotal(response.data.total);
         } catch (err) {
-            setError(err.response?.data?.detail || 'Failed to fetch users');
+            setError(err.response?.data?.detail || t('admin.failedFetchUsers'));
         } finally {
             setLoading(false);
         }
@@ -32,12 +34,12 @@ export default function UserManagement() {
     }, [roleFilter, showDeleted]);
 
     const handleDelete = async (userId) => {
-        if (!confirm('Are you sure you want to delete this user?')) return;
+        if (!confirm(t('admin.deleteUserConfirm'))) return;
         try {
             await api.delete(`/admin/users/${userId}`);
             fetchUsers();
         } catch (err) {
-            setError(err.response?.data?.detail || 'Failed to delete user');
+            setError(err.response?.data?.detail || t('admin.failedDeleteUser'));
         }
     };
 
@@ -46,36 +48,36 @@ export default function UserManagement() {
             await api.post(`/admin/users/${userId}/restore`);
             fetchUsers();
         } catch (err) {
-            setError(err.response?.data?.detail || 'Failed to restore user');
+            setError(err.response?.data?.detail || t('admin.failedRestoreUser'));
         }
     };
 
     return (
         <div>
             <div className="page-header">
-                <h1>User Management</h1>
+                <h1>{t('admin.userManagement')}</h1>
                 <Link to="/admin/users/new" className="btn-primary" style={{ textDecoration: 'none' }}>
-                    + Create User
+                    {t('admin.createUser')}
                 </Link>
             </div>
 
             <div className="filters">
                 <select value={roleFilter} onChange={e => setRoleFilter(e.target.value)}>
-                    <option value="">All Roles</option>
-                    <option value="admin">Admin</option>
-                    <option value="teacher">Teacher</option>
-                    <option value="student">Student</option>
+                    <option value="">{t('admin.allRoles')}</option>
+                    <option value="admin">{t('roles.admin')}</option>
+                    <option value="teacher">{t('roles.teacher')}</option>
+                    <option value="student">{t('roles.student')}</option>
                 </select>
                 <label className="checkbox-label">
                     <input type="checkbox" checked={showDeleted} onChange={e => setShowDeleted(e.target.checked)} />
-                    Show deleted users
+                    {t('admin.showDeletedUsers')}
                 </label>
             </div>
 
             {error && <div className="alert alert-error">{error}<button className="alert-close" onClick={() => setError('')}>×</button></div>}
 
             {loading ? (
-                <div className="loading-state"><div className="spinner" /><span>Loading users...</span></div>
+                <div className="loading-state"><div className="spinner" /><span>{t('admin.loadingUsers')}</span></div>
             ) : (
                 <>
                     <p className="result-count">{total} user{total !== 1 ? 's' : ''} found</p>

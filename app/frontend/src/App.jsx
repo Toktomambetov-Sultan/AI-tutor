@@ -22,6 +22,7 @@ import StudentList from './pages/teacher/StudentList';
 import CourseBrowser from './pages/student/CourseBrowser';
 import CourseOverview from './pages/student/CourseOverview';
 import LessonViewer from './pages/student/LessonViewer';
+import MaterialViewer from './pages/student/MaterialViewer';
 import AICall from './pages/student/AICall';
 
 export default function App() {
@@ -50,6 +51,7 @@ export default function App() {
             <Route path="/courses" element={<ProtectedRoute allowedRoles={['student']}><Layout><CourseBrowser /></Layout></ProtectedRoute>} />
             <Route path="/courses/:id" element={<ProtectedRoute allowedRoles={['student']}><Layout><CourseOverview /></Layout></ProtectedRoute>} />
             <Route path="/courses/:id/lessons/:lessonId" element={<ProtectedRoute allowedRoles={['student']}><Layout><LessonViewer /></Layout></ProtectedRoute>} />
+            <Route path="/courses/:id/lessons/:lessonId/material/:materialId" element={<ProtectedRoute allowedRoles={['student']}><MaterialViewer /></ProtectedRoute>} />
             <Route path="/courses/:id/lessons/:lessonId/call" element={<ProtectedRoute allowedRoles={['student']}><AICall /></ProtectedRoute>} />
 
             {/* Catch-all */}

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useAuthStore } from '../store/authStore';
 import './Login.css';
 
@@ -8,6 +9,7 @@ export default function Login() {
     const [password, setPassword] = useState('');
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
+    const { t } = useTranslation();
     const { login } = useAuthStore();
     const navigate = useNavigate();
 
@@ -19,7 +21,7 @@ export default function Login() {
             await login(email, password);
             navigate('/dashboard');
         } catch (err) {
-            setError(err.response?.data?.detail || 'Login failed. Please check your credentials.');
+            setError(err.response?.data?.detail || t('auth.loginFailed'));
         } finally {
             setLoading(false);
         }
@@ -30,19 +32,19 @@ export default function Login() {
             <div className="auth-brand">
                 <div className="auth-brand-content">
                     <div className="auth-brand-icon">🎓</div>
-                    <h1>AI Teacher</h1>
-                    <p>Your intelligent learning companion. Access courses, track progress, and get AI-powered tutoring — all in one place.</p>
+                    <h1>{t('auth.brandTitleLogin')}</h1>
+                    <p>{t('auth.brandTextLogin')}</p>
                 </div>
             </div>
 
             <div className="auth-form-panel">
                 <div className="auth-form-container">
-                    <h2>Welcome back</h2>
-                    <p className="auth-subtitle">Sign in to your account to continue</p>
+                    <h2>{t('auth.welcomeBack')}</h2>
+                    <p className="auth-subtitle">{t('auth.signInSubtitle')}</p>
 
                     <form onSubmit={handleSubmit}>
                         <div className="form-group">
-                            <label htmlFor="email">Email</label>
+                            <label htmlFor="email">{t('auth.email')}</label>
                             <input
                                 id="email"
                                 type="email"
@@ -55,13 +57,13 @@ export default function Login() {
                         </div>
 
                         <div className="form-group">
-                            <label htmlFor="password">Password</label>
+                            <label htmlFor="password">{t('auth.password')}</label>
                             <input
                                 id="password"
                                 type="password"
                                 value={password}
                                 onChange={e => setPassword(e.target.value)}
-                                placeholder="Enter your password"
+                                placeholder={t('auth.password')}
                                 autoComplete="current-password"
                                 required
                             />
@@ -70,12 +72,12 @@ export default function Login() {
                         {error && <div className="alert alert-error">{error}</div>}
 
                         <button type="submit" className="btn-primary btn-full" disabled={loading}>
-                            {loading ? 'Signing in...' : 'Sign In'}
+                            {loading ? t('auth.signingIn') : t('auth.signIn')}
                         </button>
                     </form>
 
                     <p className="auth-link">
-                        Student? <Link to="/register">Create an account</Link>
+                        {t('auth.studentQuestion')} <Link to="/register">{t('auth.createAnAccount')}</Link>
                     </p>
                 </div>
             </div>

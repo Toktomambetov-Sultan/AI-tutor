@@ -5,11 +5,12 @@ import re
 # _SENTENCE_RE  — canonical sentence boundaries (. ! ?)
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
-# _CLAUSE_RE — finer-grained: also splits on ; : , and em-dash so
-# that long sentences are broken into shorter TTS chunks, reducing
-# first-audio-byte latency.
-_CLAUSE_RE = re.compile(r"(?<=[.!?;:,\u2014])\s+")
-_TRAILING_CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;:,\u2014][\"')\]]?\s*$")
+# _CLAUSE_RE — finer-grained: splits on ; : and em-dash so that long
+# sentences are broken into shorter TTS chunks, reducing first-audio-byte
+# latency.  Comma is intentionally excluded: comma-split audio fragments
+# carry an unnatural tonal break that sounds jarring to the listener.
+_CLAUSE_RE = re.compile(r"(?<=[.!?;:\u2014])\s+")
+_TRAILING_CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;:\u2014][\"')\]]?\s*$")
 _TRAILING_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?][\"')\]]?\s*$")
 _TRAILING_CONTINUATION_RE = re.compile(
     r"\b(and|or|but|so|then|also|because|if|when|that|to|of|for|with|about|into|from|as)\s*$",
@@ -83,6 +84,25 @@ def classify_utterance_ending_quality(text: str) -> str:
 # ─── Language detection ──────────────────────────────────────────────
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 
+# ─── Filler utterance detection ─────────────────────────────────────
+# Short back-channel words that indicate acknowledgment/thinking rather
+# than a real conversational turn. The agent should not interrupt its
+# current speech for these.
+_FILLER_WORDS_EN: frozenset[str] = frozenset(
+    {
+        "ok", "okay", "uh", "um", "ah", "uhh", "umm",
+        "understood", "sure", "yeah", "yep", "yup", "right",
+        "mhm", "mm", "hmm", "hm", "got it", "i see",
+    }
+)
+_FILLER_WORDS_RU: frozenset[str] = frozenset(
+    {
+        "мм", "ага", "угу", "хорошо", "понял", "понятно",
+        "окей", "ок", "да", "ясно", "ладно",
+    }
+)
+_ALL_FILLER_WORDS: frozenset[str] = _FILLER_WORDS_EN | _FILLER_WORDS_RU
+
 
 def detect_language(text: str) -> str:
     """Return ``'ru'`` if *text* is predominantly Cyrillic, else ``'en'``."""
@@ -93,6 +113,21 @@ def detect_language(text: str) -> str:
         return "en"
     cyrillic_count = len(_CYRILLIC_RE.findall(text))
     return "ru" if cyrillic_count > len(alpha_chars) / 2 else "en"
+
+
+def is_filler_utterance(text: str) -> bool:
+    """Return ``True`` when *text* is a short filler / back-channel word.
+
+    Fillers are acknowledged (logged) but must NOT trigger a new LLM
+    turn — the agent should continue its current thought.
+    """
+    cleaned = (text or "").strip().lower().rstrip(".!?,")
+    if not cleaned:
+        return False
+    words = cleaned.split()
+    if len(words) > 3:
+        return False
+    return cleaned in _ALL_FILLER_WORDS
 
 
 def extract_text_from_lesson_context(lesson_context: str) -> str:

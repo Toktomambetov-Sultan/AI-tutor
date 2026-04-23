@@ -56,6 +56,41 @@ class AudioRuntimeConfig:
     torch_num_threads: int
 
 
+# Maps pocket_tts / Silero speaker names to a human-readable gender string
+# that is injected into the LLM system prompt.  Add new entries here as
+# voices are onboarded.
+SPEAKER_GENDER_MAP: dict[str, str] = {
+    # ── pocket_tts (English) ────────────────────────────────────────────
+    "alba": "female",
+    "anna": "female",
+    "azelma": "female",
+    "bill_boerst": "male",
+    "caro_davy": "female",
+    "charles": "male",
+    "cosette": "female",
+    "eponine": "female",
+    "eve": "female",
+    "fantine": "female",
+    "george": "male",
+    "jane": "female",
+    "jean": "male",
+    "javert": "male",
+    "marius": "male",
+    "mary": "female",
+    "michael": "male",
+    "paul": "male",
+    "peter_yearsley": "male",
+    "stuart_bell": "male",
+    "vera": "female",
+    # ── Silero TTS (Russian v5_ru) ──────────────────────────────────────
+    "aidar": "male",
+    "baya": "female",
+    "kseniya": "female",
+    "xenia": "female",
+    "eugene": "male",
+}
+
+
 @dataclass(frozen=True)
 class LLMRuntimeConfig:
     model: str
@@ -65,6 +100,7 @@ class LLMRuntimeConfig:
     presence_penalty: float
     frequency_penalty: float
     max_tokens: int
+    voice_gender: str
 
 
 @dataclass(frozen=True)
@@ -108,6 +144,9 @@ class TempoConfig:
     # Lower/upper bounds used to clamp per-turn timing in safe ranges.
     min_turn_duration_sec: float
     max_turn_duration_sec: float
+    # Duration (ms) of silent audio blob injected between TTS sentences to
+    # create a natural pause.  Set to 0 to disable inter-sentence silence.
+    inter_sentence_pause_ms: int
 
 
 @dataclass(frozen=True)
@@ -123,7 +162,7 @@ def load_runtime_config() -> RuntimeConfig:
     return RuntimeConfig(
         audio=AudioRuntimeConfig(
             vad_threshold=_get_env_float("AGENT_VAD_THRESHOLD", 0.45),
-            silence_sec=_get_env_float("AGENT_SILENCE_SEC", 0.6),
+            silence_sec=_get_env_float("AGENT_SILENCE_SEC", 0.45),
             min_silence_sec=_get_env_float("AGENT_MIN_SILENCE_SEC", 0.25),
             max_silence_sec=_get_env_float("AGENT_MAX_SILENCE_SEC", 0.9),
             silence_sec_with_partial_text=_get_env_float(
@@ -145,6 +184,7 @@ def load_runtime_config() -> RuntimeConfig:
             presence_penalty=_get_env_float("AGENT_LLM_PRESENCE_PENALTY", 0.0),
             frequency_penalty=_get_env_float("AGENT_LLM_FREQUENCY_PENALTY", 0.15),
             max_tokens=max(48, _get_env_int("AGENT_LLM_MAX_TOKENS", 120)),
+            voice_gender=_get_env_str("AGENT_VOICE_GENDER", "female"),
         ),
         tts=TTSRuntimeConfig(
             enable_emotion=_get_env_bool("AGENT_TTS_ENABLE_EMOTION", True),
@@ -154,13 +194,13 @@ def load_runtime_config() -> RuntimeConfig:
         ),
         turn_policy=TurnPolicyConfig(
             min_words_for_complete=max(1, _get_env_int("AGENT_TURN_MIN_WORDS", 4)),
-            force_reply_sec=max(0.5, _get_env_float("AGENT_TURN_FORCE_REPLY_SEC", 2.2)),
+            force_reply_sec=max(0.5, _get_env_float("AGENT_TURN_FORCE_REPLY_SEC", 1.5)),
             min_recent_silence_sec=max(
                 0.0, _get_env_float("AGENT_TURN_MIN_RECENT_SILENCE_SEC", 0.3)
             ),
             partial_respond_silence_sec=max(
                 0.2,
-                _get_env_float("AGENT_TURN_PARTIAL_RESPOND_SILENCE_SEC", 0.9),
+                _get_env_float("AGENT_TURN_PARTIAL_RESPOND_SILENCE_SEC", 0.6),
             ),
             min_strong_boundary_silence_sec=max(
                 0.0,
@@ -179,6 +219,9 @@ def load_runtime_config() -> RuntimeConfig:
             ),
             max_turn_duration_sec=max(
                 1.0, _get_env_float("AGENT_TEMPO_MAX_TURN_DURATION_SEC", 12.0)
+            ),
+            inter_sentence_pause_ms=max(
+                0, _get_env_int("AGENT_INTER_SENTENCE_PAUSE_MS", 180)
             ),
         ),
     )

@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import api from '../../api/axios';
 import './Teacher.css';
 
 export default function StudentList() {
+    const { t } = useTranslation();
     const [students, setStudents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -14,7 +16,7 @@ export default function StudentList() {
             const response = await api.get('/teacher/students');
             setStudents(response.data.users);
         } catch (err) {
-            setError(err.response?.data?.detail || 'Failed to fetch students');
+            setError(err.response?.data?.detail || t('teacher.failedFetchStudents'));
         } finally {
             setLoading(false);
         }
@@ -23,21 +25,21 @@ export default function StudentList() {
     return (
         <div>
             <div className="page-header">
-                <h1>My Students</h1>
+                <h1>{t('teacher.myStudents')}</h1>
             </div>
             <p style={{ color: 'var(--text-secondary)', marginBottom: '1.25rem', fontSize: '0.875rem' }}>
-                Students who have accessed your course materials.
+                {t('teacher.studentAccessText')}
             </p>
 
             {error && <div className="alert alert-error">{error}</div>}
 
             {loading ? (
-                <div className="loading-state"><div className="spinner" /><span>Loading students...</span></div>
+                <div className="loading-state"><div className="spinner" /><span>{t('teacher.loadingStudents')}</span></div>
             ) : students.length === 0 ? (
                 <div className="empty-state-card">
                     <div className="empty-icon">🎓</div>
-                    <h3>No students yet</h3>
-                    <p>Students will appear here once they access your lessons.</p>
+                    <h3>{t('teacher.noStudents')}</h3>
+                    <p>{t('teacher.noStudentsText')}</p>
                 </div>
             ) : (
                 <>
@@ -46,9 +48,9 @@ export default function StudentList() {
                         <table className="data-table">
                             <thead>
                                 <tr>
-                                    <th>Name</th>
-                                    <th>Email</th>
-                                    <th>Status</th>
+                                    <th>{t('teacher.name')}</th>
+                                    <th>{t('teacher.email')}</th>
+                                    <th>{t('teacher.status')}</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -58,8 +60,8 @@ export default function StudentList() {
                                         <td style={{ color: 'var(--text-secondary)' }}>{s.email}</td>
                                         <td>
                                             {s.is_active
-                                                ? <span className="badge badge-active">Active</span>
-                                                : <span className="badge badge-inactive">Inactive</span>
+                                                ? <span className="badge badge-active">{t('teacher.active')}</span>
+                                                : <span className="badge badge-inactive">{t('teacher.inactive')}</span>
                                             }
                                         </td>
                                     </tr>
@@ -76,8 +78,8 @@ export default function StudentList() {
                                 <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>{s.email}</div>
                                 <div style={{ marginTop: '0.5rem' }}>
                                     {s.is_active
-                                        ? <span className="badge badge-active">Active</span>
-                                        : <span className="badge badge-inactive">Inactive</span>
+                                        ? <span className="badge badge-active">{t('teacher.active')}</span>
+                                        : <span className="badge badge-inactive">{t('teacher.inactive')}</span>
                                     }
                                 </div>
                             </div>

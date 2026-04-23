@@ -26,6 +26,7 @@ import threading
 import time
 from typing import Callable
 
+import numpy as np
 import scipy.io.wavfile
 import torch
 from openai import OpenAI
@@ -38,7 +39,10 @@ from core.pipeline import LLMPipeline
 from core.prompts import (
     FALLBACK_SYSTEM_PROMPT,
     INTERRUPT_CONTEXT_TEMPLATE,
+    LESSON_END_TOKEN,
     OPENING_GREETING_INSTRUCTION,
+    SILENCE_CONTEXT_TEMPLATE,
+    VOICE_GENDER_SYSTEM_MSG,
     VOICE_STYLE_GUARDRAIL,
 )
 from core.protocol import MessageType, QueueMessage
@@ -52,6 +56,7 @@ from core.utils import (
     extract_text_from_lesson_context,
     has_trailing_clause_boundary,
     split_clauses,
+    is_filler_utterance,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,6 +145,12 @@ class ConversationalAgent:
         self.messages: list[dict] = [
             {"role": "system", "content": self.context},
             {"role": "system", "content": VOICE_STYLE_GUARDRAIL},
+            {
+                "role": "system",
+                "content": VOICE_GENDER_SYSTEM_MSG.format(
+                    gender=RUNTIME_CONFIG.llm.voice_gender
+                ),
+            },
         ]
 
     def _init_session_state(self):
@@ -319,6 +330,21 @@ class ConversationalAgent:
     # TTS helper (unchanged engine, but per-sentence now)
     # ────────────────────────────────────────────────────────────
 
+    def _get_tts_sample_rate(self, lang: str) -> int:
+        """Return the sample rate for the TTS engine used for *lang*."""
+        if lang == "ru" and self._resources.ru_tts_model is not None:
+            return self._resources.ru_sample_rate
+        return self._resources.tts_model.sample_rate
+
+    def _make_silence_wav(self, duration_ms: int, lang: str = "en") -> bytes:
+        """Return WAV bytes containing *duration_ms* of silence."""
+        sample_rate = self._get_tts_sample_rate(lang)
+        n_samples = int(sample_rate * duration_ms / 1000)
+        silence = np.zeros(n_samples, dtype=np.float32)
+        buf = io.BytesIO()
+        scipy.io.wavfile.write(buf, sample_rate, silence)
+        return buf.getvalue()
+
     def _emotion_style_tts_text(self, sentence: str, lang: str) -> str:
         """Apply lightweight prosody hints for English speech output only."""
         if lang != "en":
@@ -399,6 +425,13 @@ class ConversationalAgent:
             self.response_queue.put_nowait, QueueMessage(MessageType.END)
         )
 
+    def _check_lesson_end(self) -> None:
+        """Emit lesson_end signal to the transport queue."""
+        self.loop.call_soon_threadsafe(
+            self.response_queue.put_nowait,
+            QueueMessage(MessageType.SIGNAL, "lesson_end"),
+        )
+
     # ────────────────────────────────────────────────────────────
     # LLM streaming + per-sentence TTS
     # ────────────────────────────────────────────────────────────
@@ -437,11 +470,19 @@ class ConversationalAgent:
 
         def _tts_worker():
             """Consume clauses from *sentence_q* and synthesise + send."""
+            pause_ms = RUNTIME_CONFIG.tempo.inter_sentence_pause_ms
+            prev_clause: str | None = None
             while True:
                 clause = sentence_q.get()
                 if clause is None or self._interrupted.is_set():
                     break
+                # Inject a natural pause between sentences (not before the first).
+                if prev_clause is not None and pause_ms > 0 and not self._interrupted.is_set():
+                    silence_lang = detect_language(clause)
+                    silence_wav = self._make_silence_wav(pause_ms, silence_lang)
+                    self._send_audio(silence_wav)
                 _synthesise_and_send(clause)
+                prev_clause = clause
 
         worker = threading.Thread(target=_tts_worker, daemon=True)
         worker.start()
@@ -459,7 +500,8 @@ class ConversationalAgent:
         )
 
         buffer = ""  # accumulates tokens until a clause boundary
-        full_reply = ""  # everything the LLM produced
+        full_reply = ""  # everything the LLM produced (token-stripped)
+        lesson_end_requested = False
 
         try:
             for chunk in stream:
@@ -473,6 +515,12 @@ class ConversationalAgent:
                 token = delta.content
                 buffer += token
                 full_reply += token
+
+                # T08: lesson-end marker must never be spoken aloud.
+                if LESSON_END_TOKEN in full_reply or LESSON_END_TOKEN in buffer:
+                    lesson_end_requested = True
+                    full_reply = full_reply.replace(LESSON_END_TOKEN, "")
+                    buffer = buffer.replace(LESSON_END_TOKEN, "")
 
                 # Emit as soon as we have a complete trailing clause so
                 # first audio starts earlier without waiting for extra tokens.
@@ -514,6 +562,9 @@ class ConversationalAgent:
         sentence_q.put(None)
         worker.join(timeout=30)
 
+        if lesson_end_requested:
+            self._check_lesson_end()
+
         self._current_ai_text = full_reply
 
         # Return the text that was *actually spoken* to the student.
@@ -554,9 +605,17 @@ class ConversationalAgent:
     # Turn handling
     # ────────────────────────────────────────────────────────────
 
-    def _on_utterance_detected(self, text: str):
+    def _on_utterance_detected(self, text: str, elapsed_sec: float | None = None):
         with self._processing_lock:
             if self._processing:
+                # T04: Filler words (e.g. "okay", "mm", "ага") should NOT
+                # interrupt the agent's current thought — silently absorb them.
+                if is_filler_utterance(text):
+                    logger.info(
+                        "Filler utterance detected during AI turn — suppressing interrupt: %r",
+                        text[:80],
+                    )
+                    return
                 # User spoke while AI is still responding — trigger interrupt
                 # and queue this utterance so it's processed once the current
                 # turn finishes.
@@ -570,7 +629,9 @@ class ConversationalAgent:
                 return
             self._processing = True
 
-        threading.Thread(target=self._handle_turn, args=(text,), daemon=True).start()
+        threading.Thread(
+            target=self._handle_turn, args=(text,), kwargs={"elapsed_sec": elapsed_sec}, daemon=True
+        ).start()
 
     def _process_pending_utterance(self):
         """If a student utterance arrived during the previous AI turn,
@@ -581,7 +642,7 @@ class ConversationalAgent:
             logger.info("Processing pending interrupt utterance: %s", text[:120])
             self._on_utterance_detected(text)
 
-    def _handle_turn(self, text: str):
+    def _handle_turn(self, text: str, elapsed_sec: float | None = None):
         try:
             text = text.strip()
             if not text:
@@ -631,6 +692,15 @@ class ConversationalAgent:
                 )
                 self._interrupted.clear()
 
+            # ── T02: Inject silence-context when the agent force-replied ──
+            silence_note = ""
+            if elapsed_sec is not None:
+                silence_note = SILENCE_CONTEXT_TEMPLATE.format(elapsed=elapsed_sec)
+                logger.info(
+                    "Force-reply after %.1fs silence — injecting silence context",
+                    elapsed_sec,
+                )
+
             # ── 2. RAG retrieval ──
             rag_context = ""
             if self._lesson_ready:
@@ -643,6 +713,8 @@ class ConversationalAgent:
                 self.messages.append({"role": "system", "content": rag_context})
             if interrupt_note:
                 self.messages.append({"role": "system", "content": interrupt_note})
+            if silence_note:
+                self.messages.append({"role": "system", "content": silence_note})
 
             self.messages.append({"role": "user", "content": text})
 

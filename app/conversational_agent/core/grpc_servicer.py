@@ -130,6 +130,18 @@ class AudioServicer:
                             # the client receives the signal immediately.
                             audio_buffer = bytearray()
                             current_ai_text = ""
+                        if data == "lesson_end":
+                            # Flush any pending audio before final lesson_end signal.
+                            if audio_buffer:
+                                yield audio_pb2.AudioChunk(
+                                    data=bytes(audio_buffer),
+                                    ai_text=current_ai_text,
+                                )
+                                audio_buffer = bytearray()
+                                current_ai_text = ""
+                            yield audio_pb2.AudioChunk(signal=data)
+                            break
+
                         yield audio_pb2.AudioChunk(signal=data)
 
                     elif msg_type == MessageType.AUDIO:

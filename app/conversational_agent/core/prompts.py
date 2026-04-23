@@ -25,6 +25,8 @@ TUTOR_BASE_PROMPT = (
     "- Use a warm, encouraging, conversational tone.\n"
     "- Do NOT dump all information at once — teach interactively.\n"
     "- When you ask a question, wait for the student's response before continuing.\n\n"
+    "- When the lesson content is fully completed and there is nothing left to teach, "
+    "append [LESSON_END] as the final token of your reply.\n\n"
 )
 
 TUTOR_RAG_FOOTER = (
@@ -81,3 +83,25 @@ INTERRUPT_CONTEXT_TEMPLATE = (
     "Acknowledge that they interrupted, answer their question, "
     "then offer to continue where you left off.]"
 )
+
+# ─── Voice actor gender context ───────────────────────────────────────
+
+VOICE_GENDER_SYSTEM_MSG = (
+    "[SYSTEM: Your text-to-speech voice actor is {gender}. "
+    "When referring to yourself, use {gender} pronouns if the language "
+    "requires them (e.g. Russian gendered verbs).  Never confuse the student "
+    "about who is speaking to them.]"
+)
+
+# ─── Silence / force-speak context ───────────────────────────────────
+
+SILENCE_CONTEXT_TEMPLATE = (
+    "[SYSTEM: The student has been silent for {elapsed:.1f} seconds. "
+    "They may be thinking, hesitating, or waiting for you to continue. "
+    "Gently re-engage: either ask a short follow-up question, offer a hint, "
+    "or continue teaching the next point of the lesson.]"
+)
+
+# ─── Lesson completion token ───────────────────────────────────────
+
+LESSON_END_TOKEN = "[LESSON_END]"

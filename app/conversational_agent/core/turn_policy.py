@@ -103,12 +103,14 @@ class TimingAwareTurnGate:
         accumulated text (force reply on silence).
     """
 
-    def __init__(self, on_utterance: Callable[[str], None]) -> None:
+    def __init__(self, on_utterance: Callable[..., None]) -> None:
         self._on_utterance = on_utterance
         self._lock = threading.Lock()
         self._pending_text: str | None = None
         self._timer: threading.Timer | None = None
         self._last_feed_monotonic: float | None = None
+        # Timestamp when pending text accumulation started (for elapsed-silence calc).
+        self._pending_since_monotonic: float | None = None
 
     # ── public ──────────────────────────────────────────────────────
 
@@ -146,12 +148,16 @@ class TimingAwareTurnGate:
                 recent_silence_sec=decision_recent_silence,
             ) == "respond":
                 self._pending_text = None
-                # Dispatch outside the lock to avoid holding it during the callback
+                # Dispatch outside the lock to avoid holding it during the callback.
+                # elapsed_sec=None for user-triggered responses (no silence gap to report).
                 dispatch_text = text
+                self._pending_since_monotonic = None
 
             else:
                 # Hold the utterance and start force-reply timer
                 self._pending_text = text
+                if self._pending_since_monotonic is None:
+                    self._pending_since_monotonic = now
                 force_sec = RUNTIME_CONFIG.turn_policy.force_reply_sec
                 logger.debug(
                     "Turn gate: holding partial %r — force-reply in %.1fs",
@@ -164,6 +170,12 @@ class TimingAwareTurnGate:
                 return  # do not dispatch yet
 
         self._dispatch(dispatch_text)
+
+    def _elapsed_since_pending(self) -> float | None:
+        """Return seconds since the pending utterance first accumulated, or None."""
+        if self._pending_since_monotonic is None:
+            return None
+        return max(0.0, time.monotonic() - self._pending_since_monotonic)
 
     def close(self) -> None:
         """Cancel any pending timer (call on session teardown)."""
@@ -186,10 +198,20 @@ class TimingAwareTurnGate:
                 "Turn gate: force-reply triggered after silence — text: %r",
                 text[:120],
             )
-            self._dispatch(text)
+            elapsed_sec = self._elapsed_since_pending()
+            self._pending_since_monotonic = None
+            self._dispatch(text, elapsed_sec=elapsed_sec)
 
-    def _dispatch(self, text: str) -> None:
+    def _dispatch(self, text: str, elapsed_sec: float | None = None) -> None:
         try:
-            self._on_utterance(text)
+            # Backward-compatible: if callback does not accept elapsed_sec,
+            # call it with text-only.
+            if elapsed_sec is None:
+                self._on_utterance(text)
+            else:
+                try:
+                    self._on_utterance(text, elapsed_sec=elapsed_sec)
+                except TypeError:
+                    self._on_utterance(text)
         except Exception:
             logger.exception("on_utterance callback raised in TimingAwareTurnGate")

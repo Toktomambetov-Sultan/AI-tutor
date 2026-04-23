@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import api from '../../api/axios';
 import './Admin.css';
 
 export default function UserDetail() {
     const { id } = useParams();
     const navigate = useNavigate();
+    const { t } = useTranslation();
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
@@ -24,12 +26,12 @@ export default function UserDetail() {
     };
 
     const handleDelete = async () => {
-        if (!confirm('Are you sure you want to delete this user?')) return;
+        if (!confirm(t('admin.deleteUserConfirm'))) return;
         try {
             await api.delete(`/admin/users/${id}`);
             navigate('/admin/users');
         } catch (err) {
-            setError(err.response?.data?.detail || 'Failed to delete user');
+            setError(err.response?.data?.detail || t('admin.failedDeleteUser'));
         }
     };
 
@@ -38,23 +40,23 @@ export default function UserDetail() {
             await api.post(`/admin/users/${id}/restore`);
             fetchUser();
         } catch (err) {
-            setError(err.response?.data?.detail || 'Failed to restore user');
+            setError(err.response?.data?.detail || t('admin.failedRestoreUser'));
         }
     };
 
-    if (loading) return <div className="loading-state"><div className="spinner" /><span>Loading user...</span></div>;
+    if (loading) return <div className="loading-state"><div className="spinner" /><span>{t('admin.loadingUser')}</span></div>;
     if (error && !user) return <div className="alert alert-error">{error}</div>;
-    if (!user) return <div className="alert alert-error">User not found</div>;
+    if (!user) return <div className="alert alert-error">{t('admin.userNotFound')}</div>;
 
     return (
         <div>
             <button className="btn-back" onClick={() => navigate('/admin/users')}>
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 12L6 8l4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                Back to Users
+                {t('admin.backToUsers')}
             </button>
 
             <div className="page-header">
-                <h1>User Detail</h1>
+                <h1>{t('admin.userDetail')}</h1>
             </div>
 
             <div className="card">
