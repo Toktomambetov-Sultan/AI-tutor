@@ -605,7 +605,7 @@ class ConversationalAgent:
     # Turn handling
     # ────────────────────────────────────────────────────────────
 
-    def _on_utterance_detected(self, text: str, elapsed_sec: float | None = None):
+    def _on_utterance_detected(self, text: str, elapsed_sec: float | None = 2):
         with self._processing_lock:
             if self._processing:
                 # T04: Filler words (e.g. "okay", "mm", "ага") should NOT
