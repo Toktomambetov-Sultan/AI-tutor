@@ -67,9 +67,21 @@ class AudioServicer:
                 async for chunk in request_iterator:
                     # ── Handle client-side interrupt signal ──
                     if chunk.client_signal == "interrupt" and agent is not None:
-                        logger.info("Client interrupt received — cancelling TTS")
-                        agent.handle_interrupt()
+                        logger.info(
+                            "Client interrupt received but ignoring (barge-in is now STT-driven)"
+                        )
                         continue
+                    elif chunk.client_signal == "end_call":
+                        logger.info("Client end_call received — terminating session")
+                        # Clear queue to exit quickly and prevent processing backlog
+                        while not response_queue.empty():
+                            try:
+                                response_queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                break
+                        # Break out of the generator loop immediately
+                        # which finishes consumer_task, ending the session gracefully.
+                        break
 
                     if first_message:
                         lesson_context = chunk.lesson_context or ""

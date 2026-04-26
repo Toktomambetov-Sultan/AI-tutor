@@ -128,6 +128,10 @@ class TurnPolicyConfig:
     # Minimum silence accepted for punctuation-ended utterances to reduce
     # over-eager responses on clipped ASR boundaries.
     min_strong_boundary_silence_sec: float
+    # If the student stays silent this long after an AI response,
+    # proactively re-engage with a brief follow-up.
+    proactive_silence_sec: float
+    max_proactive_silence_sec: float
 
 
 @dataclass(frozen=True)
@@ -205,6 +209,14 @@ def load_runtime_config() -> RuntimeConfig:
             min_strong_boundary_silence_sec=max(
                 0.0,
                 _get_env_float("AGENT_TURN_MIN_STRONG_BOUNDARY_SILENCE_SEC", 0.08),
+            ),
+            proactive_silence_sec=max(
+                2.0,
+                _get_env_float("AGENT_TURN_PROACTIVE_SILENCE_SEC", 8.0),
+            ),
+            max_proactive_silence_sec=max(
+                20.0,
+                _get_env_float("AGENT_TURN_MAX_PROACTIVE_SILENCE_SEC", 30.0),
             ),
         ),
         tempo=TempoConfig(

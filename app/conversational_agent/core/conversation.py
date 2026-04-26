@@ -42,6 +42,7 @@ from core.prompts import (
     LESSON_END_TOKEN,
     OPENING_GREETING_INSTRUCTION,
     SILENCE_CONTEXT_TEMPLATE,
+    STT_CLARIFY_FALLBACK,
     VOICE_GENDER_SYSTEM_MSG,
     VOICE_STYLE_GUARDRAIL,
 )
@@ -50,11 +51,13 @@ from core.rag import LessonRAG
 from core.resources import SharedResources, build_default_shared_resources
 from core.session_state import SessionState
 from core.tempo import NORMAL, apply_tempo_shaping, classify_tempo
-from core.turn_policy import TimingAwareTurnGate
+from core.turn_policy import TimingAwareTurnGate, calculate_proactive_delay
 from core.utils import (
     detect_language,
     extract_text_from_lesson_context,
     has_trailing_clause_boundary,
+    is_lesson_end_request,
+    is_low_confidence_transcript,
     split_clauses,
     is_filler_utterance,
 )
@@ -163,6 +166,9 @@ class ConversationalAgent:
         self._processing_lock = threading.Lock()
         self._pending_utterance: str | None = None
         self._first_turn = True
+        self._session_finished = False
+        self._silence_timer: threading.Timer | None = None
+        self._silence_timer_lock = threading.Lock()
 
         # Turn gate and tempo state — fully initialised in _init_processor
         self._turn_gate: TimingAwareTurnGate | None = None
@@ -194,6 +200,7 @@ class ConversationalAgent:
         self._processor = audio_processor_factory(
             on_utterance=self._turn_gate.feed,
             recognizer=recognizer,
+            on_partial_utterance=self._on_partial_utterance_detected,
         )
 
     # ────────────────────────────────────────────────────────────
@@ -216,6 +223,35 @@ class ConversationalAgent:
         """
         self._interrupted.set()
 
+        now = time.monotonic()
+        if hasattr(self, "_spoken_schedule"):
+            actually_spoken = []
+            for item in self._spoken_schedule:
+                if now >= item["end"]:
+                    actually_spoken.append(item["clause"])
+                elif now >= item["start"]:
+                    # Partial sentence: approximate word count based on elapsed time vs total length
+                    fraction = min(
+                        1.0,
+                        max(0.0, (now - item["start"]) / (item["end"] - item["start"])),
+                    )
+                    words = item["clause"].split()
+                    num_words = int(len(words) * fraction)
+                    if num_words > 0:
+                        actually_spoken.append(" ".join(words[:num_words]) + "...")
+                        logger.info(
+                            "Interrupted mid-sentence. Trimmed to: %s",
+                            actually_spoken[-1],
+                        )
+                    break
+                else:
+                    break
+
+            if actually_spoken:
+                self._spoken_sentences = actually_spoken
+            else:
+                self._spoken_sentences = []
+
         def _drain_and_signal():
             drained = 0
             while not self.response_queue.empty():
@@ -236,6 +272,7 @@ class ConversationalAgent:
 
     def close(self):
         """Clean up ffmpeg and RAG resources."""
+        self._cancel_silence_timer()
         self._processor.close()
         self.rag.close()
         if self._turn_gate is not None:
@@ -427,10 +464,83 @@ class ConversationalAgent:
 
     def _check_lesson_end(self) -> None:
         """Emit lesson_end signal to the transport queue."""
+        self._session_finished = True
+        self._cancel_silence_timer()
         self.loop.call_soon_threadsafe(
             self.response_queue.put_nowait,
             QueueMessage(MessageType.SIGNAL, "lesson_end"),
         )
+
+    def _cancel_silence_timer(self) -> None:
+        with self._silence_timer_lock:
+            if self._silence_timer is not None:
+                self._silence_timer.cancel()
+                self._silence_timer = None
+
+    def _reset_silence_timer(self, delay_sec: float | None = None) -> None:
+        """Schedule proactive re-engagement when the student stays silent.
+        If `delay_sec` is not provided, defaults to the base proactive silence timeout.
+        """
+        if self._session_finished:
+            return
+
+        if delay_sec is None:
+            delay_sec = RUNTIME_CONFIG.turn_policy.proactive_silence_sec
+
+        self._cancel_silence_timer()
+        with self._silence_timer_lock:
+            self._silence_timer = threading.Timer(
+                delay_sec,
+                lambda: self._on_silence_timeout(delay_sec),
+            )
+            self._silence_timer.daemon = True
+            self._silence_timer.start()
+
+    def _on_silence_timeout(self, elapsed_sec: float) -> None:
+        """Trigger a proactive tutor follow-up when no utterance arrives."""
+        with self._processing_lock:
+            if self._session_finished:
+                return
+            if self._processing:
+                # Busy now; try again later.
+                self._reset_silence_timer()
+                return
+            self._processing = True
+
+        threading.Thread(
+            target=self._handle_silence_followup,
+            args=(elapsed_sec,),
+            daemon=True,
+        ).start()
+
+    def _handle_silence_followup(self, elapsed_sec: float) -> None:
+        try:
+            silence_note = SILENCE_CONTEXT_TEMPLATE.format(elapsed=elapsed_sec)
+            spoken_reply = self._stream_llm_and_speak(extra_system_msg=silence_note)
+            logger.info("AI proactive follow-up after silence: %s", spoken_reply[:200])
+            self.messages.append({"role": "assistant", "content": spoken_reply})
+        except Exception as e:
+            logger.error(
+                "Error during proactive silence follow-up: %s", e, exc_info=True
+            )
+        finally:
+            with self._processing_lock:
+                self._processing = False
+            self._process_pending_utterance()
+
+    def _speak_direct_text(self, text: str) -> str:
+        """Speak a deterministic text response without a new LLM call."""
+        self._interrupted.clear()
+        self._spoken_sentences = []
+        for clause in split_clauses(text):
+            if self._interrupted.is_set():
+                break
+            wav = self._synthesise_sentence(clause)
+            self._send_audio(wav, ai_text=clause)
+            self._spoken_sentences.append(clause)
+        spoken = " ".join(self._spoken_sentences) if self._spoken_sentences else text
+        self._current_ai_text = spoken
+        return spoken
 
     # ────────────────────────────────────────────────────────────
     # LLM streaming + per-sentence TTS
@@ -450,6 +560,8 @@ class ConversationalAgent:
         self._interrupted.clear()
         self._spoken_sentences = []
         self._current_ai_text = ""
+        self._spoken_schedule = []
+        self._audio_playhead = 0.0
 
         # Emit advisory tempo hint so clients can adjust playback speed.
         if RUNTIME_CONFIG.tempo.adapt_enabled:
@@ -465,6 +577,30 @@ class ConversationalAgent:
             """Synthesise *clause* and queue the resulting audio."""
             logger.info("TTS clause: %s", clause)
             wav = self._synthesise_sentence(clause)
+
+            # Track playhead for word-level interruption alignment
+            now = time.monotonic()
+            if self._audio_playhead < now:
+                self._audio_playhead = now
+
+            start_time = self._audio_playhead
+            # Estimate duration based on TTS model rate, or roughly 2.5 words/sec fallback
+            duration_sec = 0.0
+            try:
+                import io, wave
+
+                with wave.open(io.BytesIO(wav), "rb") as w:
+                    duration_sec = w.getnframes() / float(w.getframerate())
+            except Exception:
+                duration_sec = max(0.5, len(clause.split()) / 2.5)
+
+            end_time = start_time + duration_sec
+            self._audio_playhead = end_time
+
+            self._spoken_schedule.append(
+                {"start": start_time, "end": end_time, "clause": clause}
+            )
+
             self._send_audio(wav, ai_text=clause)
             self._spoken_sentences.append(clause)
 
@@ -477,9 +613,17 @@ class ConversationalAgent:
                 if clause is None or self._interrupted.is_set():
                     break
                 # Inject a natural pause between sentences (not before the first).
-                if prev_clause is not None and pause_ms > 0 and not self._interrupted.is_set():
+                if (
+                    prev_clause is not None
+                    and pause_ms > 0
+                    and not self._interrupted.is_set()
+                ):
                     silence_lang = detect_language(clause)
                     silence_wav = self._make_silence_wav(pause_ms, silence_lang)
+                    now = time.monotonic()
+                    if self._audio_playhead < now:
+                        self._audio_playhead = now
+                    self._audio_playhead += pause_ms / 1000.0
                     self._send_audio(silence_wav)
                 _synthesise_and_send(clause)
                 prev_clause = clause
@@ -594,6 +738,7 @@ class ConversationalAgent:
             spoken = self._stream_and_speak(greeting_messages)
             logger.info("Opening greeting: %s", spoken[:200])
             self.messages.append({"role": "assistant", "content": spoken})
+            self._reset_silence_timer(calculate_proactive_delay(spoken))
         except Exception as e:
             logger.error("Error sending opening greeting: %s", e, exc_info=True)
         finally:
@@ -605,9 +750,42 @@ class ConversationalAgent:
     # Turn handling
     # ────────────────────────────────────────────────────────────
 
-    def _on_utterance_detected(self, text: str, elapsed_sec: float | None = 2):
+    def _on_partial_utterance_detected(self, text: str):
+        """Called frequently during student speech with partial STT results.
+        If actual valid words are detected while the AI is talking, immediately
+        interrupt it (STT-driven barge-in).
+        """
+        if not self._processing or self._interrupted.is_set():
+            return
+
+        with self._processing_lock:
+            if not self._processing or self._interrupted.is_set():
+                return
+
+            if is_low_confidence_transcript(text):
+                return
+            if is_filler_utterance(text):
+                return
+
+            logger.info(
+                "Valid words detected mid-utterance (%r) — triggering interrupt",
+                text[:80],
+            )
+            # Queue it so it's captured immediately when AI turn aborts
+            self._pending_utterance = text
+            self.handle_interrupt()
+
+    def _on_utterance_detected(self, text: str, elapsed_sec: float | None = None):
+        self._cancel_silence_timer()
         with self._processing_lock:
             if self._processing:
+                if is_low_confidence_transcript(text):
+                    logger.info(
+                        "Low-confidence/empty STT noise detected during AI turn — suppressing interrupt: %r",
+                        text[:80],
+                    )
+                    return
+
                 # T04: Filler words (e.g. "okay", "mm", "ага") should NOT
                 # interrupt the agent's current thought — silently absorb them.
                 if is_filler_utterance(text):
@@ -630,7 +808,10 @@ class ConversationalAgent:
             self._processing = True
 
         threading.Thread(
-            target=self._handle_turn, args=(text,), kwargs={"elapsed_sec": elapsed_sec}, daemon=True
+            target=self._handle_turn,
+            args=(text,),
+            kwargs={"elapsed_sec": elapsed_sec},
+            daemon=True,
         ).start()
 
     def _process_pending_utterance(self):
@@ -643,6 +824,7 @@ class ConversationalAgent:
             self._on_utterance_detected(text)
 
     def _handle_turn(self, text: str, elapsed_sec: float | None = None):
+        spoken_reply = None
         try:
             text = text.strip()
             if not text:
@@ -650,6 +832,20 @@ class ConversationalAgent:
             logger.info("Processing speech turn — text: %s", text[:200])
 
             if text.lower() in ("quit", "exit", "stop"):
+                return
+
+            if is_low_confidence_transcript(text):
+                logger.info("Low-confidence STT transcript detected, asking to repeat")
+                spoken = self._speak_direct_text(STT_CLARIFY_FALLBACK)
+                self.messages.append({"role": "assistant", "content": spoken})
+                return
+
+            if is_lesson_end_request(text):
+                logger.info("Student requested to finish lesson — closing session")
+                closing_text = "Great work today. We can finish the lesson here."
+                spoken = self._speak_direct_text(closing_text)
+                self.messages.append({"role": "assistant", "content": spoken})
+                self._check_lesson_end()
                 return
 
             # ── 0. Track utterance for tempo adaptation ──
@@ -670,7 +866,9 @@ class ConversationalAgent:
             if len(self._student_utterances) > 10:
                 self._student_utterances = self._student_utterances[-10:]
             if len(self._student_turn_durations_sec) > 10:
-                self._student_turn_durations_sec = self._student_turn_durations_sec[-10:]
+                self._student_turn_durations_sec = self._student_turn_durations_sec[
+                    -10:
+                ]
             if RUNTIME_CONFIG.tempo.adapt_enabled:
                 recent_utterances = self._student_utterances[-5:]
                 self._current_tempo_hint = classify_tempo(
@@ -692,15 +890,6 @@ class ConversationalAgent:
                 )
                 self._interrupted.clear()
 
-            # ── T02: Inject silence-context when the agent force-replied ──
-            silence_note = ""
-            if elapsed_sec is not None:
-                silence_note = SILENCE_CONTEXT_TEMPLATE.format(elapsed=elapsed_sec)
-                logger.info(
-                    "Force-reply after %.1fs silence — injecting silence context",
-                    elapsed_sec,
-                )
-
             # ── 2. RAG retrieval ──
             rag_context = ""
             if self._lesson_ready:
@@ -713,8 +902,6 @@ class ConversationalAgent:
                 self.messages.append({"role": "system", "content": rag_context})
             if interrupt_note:
                 self.messages.append({"role": "system", "content": interrupt_note})
-            if silence_note:
-                self.messages.append({"role": "system", "content": silence_note})
 
             self.messages.append({"role": "user", "content": text})
 
@@ -735,3 +922,4 @@ class ConversationalAgent:
                 self._processing = False
             # If the student spoke while we were busy, handle it now
             self._process_pending_utterance()
+            self._reset_silence_timer(calculate_proactive_delay(spoken_reply))

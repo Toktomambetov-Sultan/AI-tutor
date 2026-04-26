@@ -911,6 +911,7 @@ class TestHistoryCompression:
         # Messages should be unchanged
         assert len(agent.messages) == original_count
 
+
 # ─────────────────────────────────────────────────────────────────────
 # 9.  Timing-aware turn decision policy
 # ─────────────────────────────────────────────────────────────────────
@@ -1036,11 +1037,12 @@ class TestTimingAwareTurnGate:
         fast_turn_policy = replace(original_cfg.turn_policy, force_reply_sec=0.05)
         fast_cfg = replace(original_cfg, turn_policy=fast_turn_policy)
 
-        with patch.object(_cfg_mod, "RUNTIME_CONFIG", fast_cfg), \
-             patch.object(_tp_mod, "RUNTIME_CONFIG", fast_cfg):
+        with patch.object(_cfg_mod, "RUNTIME_CONFIG", fast_cfg), patch.object(
+            _tp_mod, "RUNTIME_CONFIG", fast_cfg
+        ):
             gate2 = TimingAwareTurnGate(lambda t: received.append(t))
             gate2.feed("Hmm")  # partial → wait, timer starts at 0.05s
-            time.sleep(0.2)    # wait past the force-reply window
+            time.sleep(0.2)  # wait past the force-reply window
 
         assert received == ["Hmm"], f"Expected force-reply, got: {received}"
 
@@ -1051,8 +1053,8 @@ class TestTimingAwareTurnGate:
         received = []
         gate = TimingAwareTurnGate(lambda t: received.append(t))
         # Feed two short partials quickly; together they exceed min_words threshold
-        gate.feed("I think")         # 2 words → wait
-        gate.feed("it is clear")     # merged: "I think it is clear" = 5 words → respond
+        gate.feed("I think")  # 2 words → wait
+        gate.feed("it is clear")  # merged: "I think it is clear" = 5 words → respond
         assert received == ["I think it is clear"]
         gate.close()
 
@@ -1063,7 +1065,7 @@ class TestTimingAwareTurnGate:
         received = []
         gate = TimingAwareTurnGate(lambda t: received.append(t))
         gate.feed("Uh")  # partial → timer starts
-        gate.close()     # must cancel timer
+        gate.close()  # must cancel timer
         time.sleep(0.3)  # wait past any reasonable default
         assert received == [], f"Expected no dispatch after close, got: {received}"
 
@@ -1084,8 +1086,9 @@ class TestTimingAwareTurnGate:
         fast_turn_policy = replace(original_cfg.turn_policy, force_reply_sec=0.05)
         fast_cfg = replace(original_cfg, turn_policy=fast_turn_policy)
 
-        with patch.object(_cfg_mod, "RUNTIME_CONFIG", fast_cfg), \
-             patch.object(_tp_mod, "RUNTIME_CONFIG", fast_cfg):
+        with patch.object(_cfg_mod, "RUNTIME_CONFIG", fast_cfg), patch.object(
+            _tp_mod, "RUNTIME_CONFIG", fast_cfg
+        ):
             gate = TimingAwareTurnGate(_cb)
             gate.feed("Hmm")
             time.sleep(0.2)
@@ -1184,7 +1187,7 @@ class TestTempoStrategy:
 
         # ~60 WPM → SLOW (below default threshold 80)
         utts = ["hello world"]
-        durations = [2.0]   # 2 words / 2s = 60 WPM
+        durations = [2.0]  # 2 words / 2s = 60 WPM
         assert classify_tempo(utts, durations) == SLOW
 
     def test_wpm_based_fast(self):
@@ -1192,7 +1195,7 @@ class TestTempoStrategy:
 
         # ~200 WPM → FAST (above default threshold 160)
         utts = ["one two three four five six seven eight nine ten"]  # 10 words
-        durations = [3.0]   # 10 words / 3s = 200 WPM
+        durations = [3.0]  # 10 words / 3s = 200 WPM
         assert classify_tempo(utts, durations) == FAST
 
     def test_adapt_disabled_always_normal(self):
@@ -1206,8 +1209,9 @@ class TestTempoStrategy:
         disabled_tempo = replace(original_cfg.tempo, adapt_enabled=False)
         disabled_cfg = replace(original_cfg, tempo=disabled_tempo)
 
-        with patch.object(_cfg_mod, "RUNTIME_CONFIG", disabled_cfg), \
-             patch.object(_tempo_mod, "RUNTIME_CONFIG", disabled_cfg):
+        with patch.object(_cfg_mod, "RUNTIME_CONFIG", disabled_cfg), patch.object(
+            _tempo_mod, "RUNTIME_CONFIG", disabled_cfg
+        ):
             # Even with slow-looking utterances, should return NORMAL
             assert classify_tempo(["Um", "Yes", "OK"]) == NORMAL
 
@@ -1222,7 +1226,9 @@ class TestTempoStrategy:
     def test_slow_shaping_adds_pause_after_conjunction(self):
         from core.tempo import apply_tempo_shaping, SLOW
 
-        result = apply_tempo_shaping("It converts light and stores it in glucose.", SLOW)
+        result = apply_tempo_shaping(
+            "It converts light and stores it in glucose.", SLOW
+        )
         assert "and," in result
 
     def test_fast_shaping_removes_ellipsis(self):
@@ -1281,14 +1287,10 @@ class TestTempoStrategy:
             # Minimal stream returning one sentence
             tokens = ["Good."]
             mock_stream = MagicMock()
-            mock_stream.__iter__.return_value = iter(
-                [_make_chunk(t) for t in tokens]
-            )
+            mock_stream.__iter__.return_value = iter([_make_chunk(t) for t in tokens])
             mock_openai.chat.completions.create.return_value = mock_stream
 
-            t = threading.Thread(
-                target=agent._stream_llm_and_speak, daemon=True
-            )
+            t = threading.Thread(target=agent._stream_llm_and_speak, daemon=True)
             t.start()
             t.join(timeout=10)
 
@@ -1302,9 +1304,9 @@ class TestTempoStrategy:
             loop.run_until_complete(_drain())
 
             types = [m[0] for m in messages]
-            assert MessageType.TEMPO_HINT in types, (
-                f"Expected TEMPO_HINT in queue, got: {types}"
-            )
+            assert (
+                MessageType.TEMPO_HINT in types
+            ), f"Expected TEMPO_HINT in queue, got: {types}"
             # TEMPO_HINT should appear before any audio
             hint_idx = types.index(MessageType.TEMPO_HINT)
             audio_indices = [i for i, t in enumerate(types) if t == MessageType.AUDIO]
@@ -1359,6 +1361,7 @@ class TestTempoStrategy:
 
 
 # ── helper used by TestTempoStrategy.test_tempo_hint_emitted_in_stream_and_speak ─
+
 
 def _make_chunk(token: str):
     c = MagicMock()
@@ -1872,7 +1875,9 @@ class TestInterSentenceSilence:
 
         mock_tts = MagicMock()
         mock_tts.sample_rate = 22050
-        mock_tts.generate_audio = MagicMock(return_value=np.zeros(1000, dtype=np.float32))
+        mock_tts.generate_audio = MagicMock(
+            return_value=np.zeros(1000, dtype=np.float32)
+        )
         mock_openai = MagicMock()
         resources = SharedResources(
             openai_client=mock_openai,
@@ -1967,12 +1972,16 @@ class TestVoiceGenderSystemMessage:
 
     def test_female_gender_in_system_messages(self):
         agent = self._make_agent(voice_gender="female")
-        system_contents = [m["content"] for m in agent.messages if m["role"] == "system"]
+        system_contents = [
+            m["content"] for m in agent.messages if m["role"] == "system"
+        ]
         assert any("female" in c for c in system_contents)
 
     def test_male_gender_in_system_messages(self):
         agent = self._make_agent(voice_gender="male")
-        system_contents = [m["content"] for m in agent.messages if m["role"] == "system"]
+        system_contents = [
+            m["content"] for m in agent.messages if m["role"] == "system"
+        ]
         assert any("male" in c for c in system_contents)
 
 
@@ -2014,9 +2023,7 @@ class TestLessonEndSignal:
 
         mock_tts = MagicMock()
         mock_tts.sample_rate = 22050
-        mock_tts.generate_audio = MagicMock(
-            return_value=np.zeros(64, dtype=np.float32)
-        )
+        mock_tts.generate_audio = MagicMock(return_value=np.zeros(64, dtype=np.float32))
 
         mock_openai = MagicMock()
         mock_stream = MagicMock()
@@ -2057,3 +2064,123 @@ class TestLessonEndSignal:
             assert any(m[0] == "signal" and m[1] == "lesson_end" for m in msgs)
         finally:
             loop.close()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 19. New patch regressions (STT quality + silence + explicit finish)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestNewPatchBehaviors:
+    def _make_agent(self):
+        from core.conversation import ConversationalAgent
+        from core.resources import SharedResources
+
+        import numpy as np
+
+        mock_tts = MagicMock()
+        mock_tts.sample_rate = 22050
+        mock_tts.generate_audio = MagicMock(return_value=np.zeros(64, dtype=np.float32))
+
+        mock_openai = MagicMock()
+        resources = SharedResources(
+            openai_client=mock_openai,
+            tts_model=mock_tts,
+            voice_state=MagicMock(),
+            ru_tts_model=None,
+            ru_speaker=None,
+            ru_sample_rate=None,
+            vosk_model_en=MagicMock(),
+            vosk_model_ru=None,
+        )
+
+        with patch("core.conversation.RealtimeAudioProcessor"), patch(
+            "core.conversation.LessonRAG"
+        ):
+            loop = asyncio.new_event_loop()
+            q = asyncio.Queue()
+            agent = ConversationalAgent(q, loop, resources=resources)
+
+        return agent, q, loop
+
+    def test_low_confidence_transcript_triggers_repeat_prompt(self):
+        from core.prompts import STT_CLARIFY_FALLBACK
+
+        agent, _, loop = self._make_agent()
+        try:
+            agent._speak_direct_text = MagicMock(return_value=STT_CLARIFY_FALLBACK)
+            agent._stream_llm_and_speak = MagicMock()
+            agent._reset_silence_timer = MagicMock()
+
+            agent._handle_turn("????")
+
+            agent._speak_direct_text.assert_called_once_with(STT_CLARIFY_FALLBACK)
+            agent._stream_llm_and_speak.assert_not_called()
+        finally:
+            loop.close()
+
+    def test_explicit_finish_request_emits_lesson_end_signal(self):
+        agent, q, loop = self._make_agent()
+        try:
+            agent._speak_direct_text = MagicMock(return_value="Great work today.")
+            agent._reset_silence_timer = MagicMock()
+
+            agent._handle_turn("Can we finish the lesson now?")
+
+            msgs = []
+
+            async def _drain():
+                while not q.empty():
+                    msgs.append(await q.get())
+
+            loop.run_until_complete(_drain())
+            assert any(m[0] == "signal" and m[1] == "lesson_end" for m in msgs)
+        finally:
+            loop.close()
+
+    def test_proactive_silence_followup_calls_llm(self):
+        agent, _, loop = self._make_agent()
+        try:
+            agent._stream_llm_and_speak = MagicMock(return_value="Let us continue.")
+            agent._reset_silence_timer = MagicMock()
+            agent._process_pending_utterance = MagicMock()
+
+            agent._on_silence_timeout(8.0)
+            time.sleep(0.15)
+
+            agent._stream_llm_and_speak.assert_called_once()
+            kwargs = agent._stream_llm_and_speak.call_args.kwargs
+            assert "silent for 8.0 seconds" in kwargs["extra_system_msg"]
+        finally:
+            loop.close()
+
+
+class TestTranscriptQualityHeuristics:
+    def test_detects_low_confidence_noise(self):
+        from core.utils import is_low_confidence_transcript
+
+        assert is_low_confidence_transcript("????") is True
+        assert is_low_confidence_transcript("a") is True
+
+    def test_keeps_normal_short_acknowledgements_out_of_low_confidence(self):
+        from core.utils import is_low_confidence_transcript
+
+        assert is_low_confidence_transcript("okay") is False
+
+    def test_detects_explicit_lesson_end_request(self):
+        from core.utils import is_lesson_end_request
+
+        assert is_lesson_end_request("Please finish the lesson") is True
+        assert is_lesson_end_request("Can we end class now?") is True
+
+from core.turn_policy import calculate_proactive_delay
+from core.config import RUNTIME_CONFIG
+
+def test_calculate_proactive_delay_none():
+    assert calculate_proactive_delay(None) == RUNTIME_CONFIG.turn_policy.proactive_silence_sec
+
+def test_calculate_proactive_delay_text():
+    text = "Hello there. How are you?"
+    delay = calculate_proactive_delay(text)
+    assert delay > RUNTIME_CONFIG.turn_policy.proactive_silence_sec
+    assert delay <= RUNTIME_CONFIG.turn_policy.max_proactive_silence_sec

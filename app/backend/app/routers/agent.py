@@ -268,6 +268,17 @@ async def audio_websocket(websocket: WebSocket, lesson_id: uuid.UUID):
                                     client_signal="interrupt",
                                 )
                             )
+                        elif msg.get("signal") == "end_call":
+                            logger.info(
+                                "Client end_call signal  session=%s", session_id
+                            )
+                            await send_queue.put(
+                                _audio_pb2.AudioChunk(
+                                    session_id=session_id,
+                                    timestamp_ms=int(time.time() * 1000),
+                                    client_signal="end_call",
+                                )
+                            )
                     except Exception:
                         pass
         except WebSocketDisconnect:
@@ -296,8 +307,19 @@ async def audio_websocket(websocket: WebSocket, lesson_id: uuid.UUID):
             logger.warning("gRPC response stream error: %s", exc)
 
     # Run both directions concurrently
+    ws_task = asyncio.create_task(_ws_to_grpc())
+    grpc_task = asyncio.create_task(_grpc_to_ws())
+
     try:
-        await asyncio.gather(_ws_to_grpc(), _grpc_to_ws())
+        done, pending = await asyncio.wait(
+            [ws_task, grpc_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
     except Exception as exc:
         logger.error("Audio session error: %s", exc)
     finally:

@@ -82,10 +82,12 @@ class RealtimeAudioProcessor:
         vad_threshold: float = RUNTIME_CONFIG.audio.vad_threshold,
         min_speech_sec: float = RUNTIME_CONFIG.audio.min_speech_sec,
         recognizer=None,
+        on_partial_utterance: "callable" = None,
     ):
         _ensure_silero_model()
 
         self.on_utterance = on_utterance
+        self.on_partial_utterance = on_partial_utterance
         self._recognizer = recognizer
         self.sample_rate = sample_rate
 
@@ -385,6 +387,8 @@ class RealtimeAudioProcessor:
                             candidate = (partial.get("partial") or "").strip()
                             if candidate:
                                 self._latest_partial_text = candidate
+                                if self.on_partial_utterance:
+                                    self.on_partial_utterance(candidate)
                         except Exception:
                             pass
 

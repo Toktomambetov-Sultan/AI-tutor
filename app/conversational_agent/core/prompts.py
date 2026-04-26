@@ -97,6 +97,7 @@ VOICE_GENDER_SYSTEM_MSG = (
 
 SILENCE_CONTEXT_TEMPLATE = (
     "[SYSTEM: The student has been silent for {elapsed:.1f} seconds. "
+    "Acknowledge the silence explicitly (e.g., 'I noticed you're quiet', 'Are you still there?'). "
     "They may be thinking, hesitating, or waiting for you to continue. "
     "Gently re-engage: either ask a short follow-up question, offer a hint, "
     "or continue teaching the next point of the lesson.]"
@@ -105,3 +106,9 @@ SILENCE_CONTEXT_TEMPLATE = (
 # ─── Lesson completion token ───────────────────────────────────────
 
 LESSON_END_TOKEN = "[LESSON_END]"
+
+# ─── STT clarification fallback ──────────────────────────────────────
+
+STT_CLARIFY_FALLBACK = (
+    "I did not catch that clearly. Could you please repeat your question?"
+)

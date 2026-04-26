@@ -19,7 +19,7 @@ _TRAILING_CONTINUATION_RE = re.compile(
 
 # Minimum character length for a clause to be spoken on its own.
 # Shorter fragments are accumulated into the next clause.
-_MIN_CLAUSE_LEN = 12
+_MIN_CLAUSE_LEN = 30
 
 
 def split_sentences(text: str) -> list[str]:
@@ -46,10 +46,9 @@ def split_clauses(text: str) -> list[str]:
             merged.append(buf)
             buf = ""
     if buf:
-        if merged:
-            merged[-1] = f"{merged[-1]} {buf}"
-        else:
-            merged.append(buf)
+        # If there's leftover text, it is appended as the final clause,
+        # even if it's shorter than MIN_CLAUSE_LEN.
+        merged.append(buf)
     return merged
 
 
@@ -90,18 +89,52 @@ _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 # current speech for these.
 _FILLER_WORDS_EN: frozenset[str] = frozenset(
     {
-        "ok", "okay", "uh", "um", "ah", "uhh", "umm",
-        "understood", "sure", "yeah", "yep", "yup", "right",
-        "mhm", "mm", "hmm", "hm", "got it", "i see",
+        "ok",
+        "okay",
+        "uh",
+        "um",
+        "ah",
+        "uhh",
+        "umm",
+        "understood",
+        "sure",
+        "yeah",
+        "yep",
+        "yup",
+        "right",
+        "mhm",
+        "mm",
+        "hmm",
+        "hm",
+        "got it",
+        "i see",
     }
 )
 _FILLER_WORDS_RU: frozenset[str] = frozenset(
     {
-        "мм", "ага", "угу", "хорошо", "понял", "понятно",
-        "окей", "ок", "да", "ясно", "ладно",
+        "мм",
+        "ага",
+        "угу",
+        "хорошо",
+        "понял",
+        "понятно",
+        "окей",
+        "ок",
+        "да",
+        "ясно",
+        "ладно",
     }
 )
 _ALL_FILLER_WORDS: frozenset[str] = _FILLER_WORDS_EN | _FILLER_WORDS_RU
+
+_LESSON_END_REQUEST_RE = re.compile(
+    r"\b("
+    r"finish|end|complete|wrap\s*up|stop\s+the\s+lesson|end\s+the\s+lesson|"
+    r"законч|заверш|останови\s+урок|закончи\s+урок|"
+    r"аяктаг|сабакты\s+бүтүр"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def detect_language(text: str) -> str:
@@ -130,6 +163,46 @@ def is_filler_utterance(text: str) -> bool:
     return cleaned in _ALL_FILLER_WORDS
 
 
+def is_low_confidence_transcript(text: str) -> bool:
+    """Heuristic detector for likely-bad STT transcriptions.
+
+    The STT stack does not always expose confidence scores in this stage,
+    so we apply conservative text-shape checks and ask the student to repeat
+    when a transcript looks unusable.
+    """
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return True
+
+    # Extremely short tokens are often accidental noise picks.
+    if len(cleaned) <= 1:
+        return True
+
+    # Keep normal acknowledgement tokens (e.g. "ok") out of this detector.
+    if is_filler_utterance(cleaned):
+        return False
+
+    alpha = [c for c in cleaned if c.isalpha()]
+    if not alpha:
+        return True
+
+    # Non-letter heavy output is usually STT artefact/noise.
+    if len(alpha) / max(1, len(cleaned)) < 0.45:
+        return True
+
+    # Repeated single-letter blobs ("аааа", "mmmm") are unreliable.
+    lowered = cleaned.lower()
+    if len(set(lowered.replace(" ", ""))) == 1 and len(lowered.replace(" ", "")) >= 4:
+        return True
+
+    return False
+
+
+def is_lesson_end_request(text: str) -> bool:
+    """Return ``True`` when student explicitly asks to finish the lesson."""
+    return bool(_LESSON_END_REQUEST_RE.search((text or "").strip()))
+
+
 def extract_text_from_lesson_context(lesson_context: str) -> str:
     """Extract human-readable lesson content for accurate language detection."""
     try:
@@ -156,3 +229,23 @@ def extract_text_from_lesson_context(lesson_context: str) -> str:
                     parts.append(content)
 
     return " ".join(parts).strip() or lesson_context
+
+
+def estimate_ai_turn_duration_sec(text: str) -> float:
+    """Estimate how long the AI's spoken turn will take to finish playing."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return 0.0
+    # Average speaking rate ~140 words per minute ~2.3 words/sec
+    words = max(1, len(cleaned.split()))
+    return words * 0.42
+
+
+def estimate_cognitive_load_sec(text: str) -> float:
+    """Estimate the time needed by the student to comprehend the AI's turn."""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return 0.0
+    # Cognitive load varies. Add ~0.15s per word for thinking time.
+    words = max(1, len(cleaned.split()))
+    return min(words * 0.15, 10.0)

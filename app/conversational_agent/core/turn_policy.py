@@ -24,7 +24,11 @@ import time
 from typing import Callable
 
 from core.config import RUNTIME_CONFIG
-from core.utils import classify_utterance_ending_quality
+from core.utils import (
+    classify_utterance_ending_quality,
+    estimate_ai_turn_duration_sec,
+    estimate_cognitive_load_sec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,22 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────
 # Pure helpers
 # ──────────────────────────────────────────────────────────────────────
+
+
+def calculate_proactive_delay(ai_spoken_text: str | None) -> float:
+    """Calculate the total timeout before a proactive follow-up triggers.
+    Accounts for TTS playback duration, cognitive load pause, and the
+    base proactive_silence_sec, clamped at max_proactive_silence_sec.
+    """
+    cfg = RUNTIME_CONFIG.turn_policy
+    if not ai_spoken_text:
+        return cfg.proactive_silence_sec
+
+    tts_sec = estimate_ai_turn_duration_sec(ai_spoken_text)
+    cog_sec = estimate_cognitive_load_sec(ai_spoken_text)
+    total = cfg.proactive_silence_sec + tts_sec + cog_sec
+    return min(total, cfg.max_proactive_silence_sec)
+
 
 def _word_count(text: str) -> int:
     return len(text.split())
@@ -89,6 +109,7 @@ def decide_turn(
 # Turn gate
 # ──────────────────────────────────────────────────────────────────────
 
+
 class TimingAwareTurnGate:
     """Wraps *on_utterance* with wait-and-merge / force-reply logic.
 
@@ -140,13 +161,18 @@ class TimingAwareTurnGate:
             if self._pending_text:
                 text = (self._pending_text + " " + text).strip()
 
-            decision_recent_silence = None if merged_from_pending else recent_silence_sec
+            decision_recent_silence = (
+                None if merged_from_pending else recent_silence_sec
+            )
 
-            if decide_turn(
-                text,
-                silence_after_end_sec=recent_silence_sec,
-                recent_silence_sec=decision_recent_silence,
-            ) == "respond":
+            if (
+                decide_turn(
+                    text,
+                    silence_after_end_sec=recent_silence_sec,
+                    recent_silence_sec=decision_recent_silence,
+                )
+                == "respond"
+            ):
                 self._pending_text = None
                 # Dispatch outside the lock to avoid holding it during the callback.
                 # elapsed_sec=None for user-triggered responses (no silence gap to report).

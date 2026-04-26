@@ -418,6 +418,9 @@ export default function AICall() {
             mediaRecorderRef.current.stop();
         }
         if (wsRef.current) {
+            if (wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ signal: 'end_call' }));
+            }
             wsRef.current.close();
             wsRef.current = null;
         }
