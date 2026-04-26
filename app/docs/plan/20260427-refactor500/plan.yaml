@@ -1,0 +1,133 @@
+plan_id: 20260427-refactor500
+objective: Refactor conversational_agent files exceeding 500 lines and update coding standards
+created_at: '2026-04-27T00:00:00Z'
+created_by: gem-planner
+status: approved
+research_confidence: high
+plan_metrics:
+  wave_1_task_count: 3
+  total_dependencies: 0
+  risk_score: medium
+tldr: |
+  Extract functionality from `conversation.py` and `test_streaming.py` to get them under 500 lines, and update the global coding standards to enforce a 500-line limit across the codebase.
+open_questions: []
+gaps: []
+pre_mortem:
+  overall_risk_level: medium
+  critical_failure_modes:
+    - scenario: Refactoring `conversation.py` introduces subtle state management bugs affecting the agent's memory.
+      likelihood: medium
+      impact: high
+      mitigation: Run the full test suite continually during the refactor. Ensure extracted classes maintain the exact same public interfaces.
+  assumptions:
+    - The current test suite provides adequate coverage for `conversation.py` and streaming tests to allow safe refactoring.
+implementation_specification:
+  code_structure: Extract sub-components from bloated files into new modules within the same directories.
+  affected_areas: 
+    - conversational_agent/core/
+    - conversational_agent/__tests__/
+    - prompts/
+  component_details:
+    - component: Core Conversation
+      responsibility: Manage conversation flow and state
+      interfaces: []
+      dependencies: []
+      integration_points: []
+contracts: []
+tasks:
+  - id: update-coding-standards
+    title: Append 500-line rule to coding-standards.instructions.md
+    description: |
+      Update `c:\Users\1000001228\AppData\Roaming\Code\User\prompts\coding-standards.instructions.md` to strictly mandate that no single file should exceed 500 lines of code.
+    wave: 1
+    agent: gem-implementer
+    prototype: false
+    covers: [rules]
+    priority: high
+    status: pending
+    flags:
+      flaky: false
+      retries_used: 0
+    dependencies: []
+    conflicts_with: []
+    context_files:
+      - path: "c:\\Users\\1000001228\\AppData\\Roaming\\Code\\User\\prompts\\coding-standards.instructions.md"
+        description: Global coding standards
+    estimated_effort: small
+    estimated_files: 1
+    estimated_lines: 5
+    focus_area: coding standards
+    verification: [Review file manually to ensure rule is appended]
+    acceptance_criteria:
+      - The 500-line rule is explicitly documented under a new or existing codebase rules section.
+    failure_modes:
+      - scenario: Path to coding instructions is incorrect.
+        likelihood: low
+        impact: medium
+        mitigation: Ensure we search/use the exact absolute path provided.
+
+  - id: refactor-conversation-py
+    title: Refactor core/conversation.py
+    description: |
+      Analyze `conversational_agent/core/conversation.py`. Identify distinct logical units (e.g., prompt building, state management, tool execution) and trace their dependencies. Extract 1-3 new modules (like `conversation_state.py` or `message_builder.py` or `tool_execution.py`) to reduce `conversation.py` to < 500 lines while maintaining identical external API and behavior.
+    wave: 1
+    agent: gem-code-simplifier
+    prototype: false
+    covers: [backend]
+    priority: high
+    status: pending
+    flags:
+      flaky: false
+      retries_used: 0
+    dependencies: []
+    conflicts_with: []
+    context_files:
+      - path: "conversational_agent/core/conversation.py"
+        description: Target python backend script for refactoring
+    estimated_effort: large
+    estimated_files: 3
+    estimated_lines: 300
+    focus_area: core conversation logic
+    verification: [Run `docker compose run --rm conversational_agent pytest`]
+    acceptance_criteria:
+      - "`conversation.py` is under 500 lines."
+      - "All tests in the test suite pass cleanly."
+      - "No change in external API for `conversation.py`."
+    failure_modes:
+      - scenario: Breaking circular dependencies when splitting.
+        likelihood: medium
+        impact: medium
+        mitigation: Extract leaf components with fewest dependencies first.
+
+  - id: refactor-test-streaming
+    title: Refactor __tests__/test_streaming.py
+    description: |
+      Split `conversational_agent/__tests__/test_streaming.py` into multiple smaller test files based on logical domains (e.g., `test_streaming_audio.py`, `test_streaming_grpc.py`, or similar natural boundaries). Ensure the original file is either eliminated entirely or reduced to < 500 lines.
+    wave: 1
+    agent: gem-code-simplifier
+    prototype: false
+    covers: [testing]
+    priority: medium
+    status: pending
+    flags:
+      flaky: false
+      retries_used: 0
+    dependencies: []
+    conflicts_with: []
+    context_files:
+      - path: "conversational_agent/__tests__/test_streaming.py"
+        description: Target test file
+    estimated_effort: medium
+    estimated_files: 3
+    estimated_lines: 300
+    focus_area: streaming tests
+    verification: [Run `docker compose run --rm conversational_agent pytest`]
+    acceptance_criteria:
+      - No remaining test file for streaming exceeds 500 lines.
+      - The overall test suite execution counts remain the same.
+      - All tests pass cleanly.
+    failure_modes:
+      - scenario: Missing fixture imports after splitting.
+        likelihood: low
+        impact: low
+        mitigation: Use `conftest.py` properly for fixtures or import explicitly as required.
