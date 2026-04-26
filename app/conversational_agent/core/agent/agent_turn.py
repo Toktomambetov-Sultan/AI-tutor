@@ -18,6 +18,7 @@ from core.utils import (
 
 logger = logging.getLogger(__name__)
 
+
 class AgentTurnMixin:
     """Manages the conversation turn loop and interruptions."""
 
@@ -143,15 +144,20 @@ class AgentTurnMixin:
             if len(self._student_utterances) > 10:
                 self._student_utterances = self._student_utterances[-10:]
             if len(self._student_turn_durations_sec) > 10:
-                self._student_turn_durations_sec = self._student_turn_durations_sec[-10:]
-                
+                self._student_turn_durations_sec = self._student_turn_durations_sec[
+                    -10:
+                ]
+
             if RUNTIME_CONFIG.tempo.adapt_enabled:
                 recent_utterances = self._student_utterances[-5:]
                 self._current_tempo_hint = classify_tempo(
                     recent_utterances,
                     self._student_turn_durations_sec[-len(recent_utterances) :],
                 )
-                logger.debug("Tempo hint updated: %s", getattr(self, "_current_tempo_hint", "NORMAL"))
+                logger.debug(
+                    "Tempo hint updated: %s",
+                    getattr(self, "_current_tempo_hint", "NORMAL"),
+                )
 
             interrupt_note = ""
             if self._interrupted.is_set() and self._spoken_sentences:
@@ -191,4 +197,6 @@ class AgentTurnMixin:
             with self._processing_lock:
                 self._processing = False
             self._process_pending_utterance()
-            self._reset_silence_timer(calculate_proactive_delay(spoken_reply) if spoken_reply else None)
+            self._reset_silence_timer(
+                calculate_proactive_delay(spoken_reply) if spoken_reply else None
+            )

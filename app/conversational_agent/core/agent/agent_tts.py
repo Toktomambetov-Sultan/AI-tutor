@@ -26,6 +26,7 @@ _POSITIVE_TTS_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+
 class AgentTTSMixin:
     """Provides TTS, audio streaming, and LLM text generation/speaking components
     for the ConversationalAgent."""
@@ -56,7 +57,9 @@ class AgentTTSMixin:
 
         # Apply tempo prosody shaping before emotion markup
         if RUNTIME_CONFIG.tempo.adapt_enabled:
-            text = apply_tempo_shaping(text, getattr(self, "_current_tempo_hint", "NORMAL"))
+            text = apply_tempo_shaping(
+                text, getattr(self, "_current_tempo_hint", "NORMAL")
+            )
 
         if not RUNTIME_CONFIG.tts.enable_emotion:
             return text
@@ -145,7 +148,10 @@ class AgentTTSMixin:
         if RUNTIME_CONFIG.tempo.adapt_enabled:
             self.loop.call_soon_threadsafe(
                 self.response_queue.put_nowait,
-                QueueMessage(MessageType.TEMPO_HINT, getattr(self, "_current_tempo_hint", "NORMAL")),
+                QueueMessage(
+                    MessageType.TEMPO_HINT,
+                    getattr(self, "_current_tempo_hint", "NORMAL"),
+                ),
             )
 
         # ── TTS worker (consumer) ──
@@ -163,6 +169,7 @@ class AgentTTSMixin:
             duration_sec = 0.0
             try:
                 import io, wave
+
                 with wave.open(io.BytesIO(wav), "rb") as w:
                     duration_sec = w.getnframes() / float(w.getframerate())
             except Exception:

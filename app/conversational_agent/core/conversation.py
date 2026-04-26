@@ -56,7 +56,7 @@ from core.agent import (
     AgentHistoryMixin,
     AgentTTSMixin,
     AgentTurnMixin,
-    AgentSilenceMixin
+    AgentSilenceMixin,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,9 @@ logger = logging.getLogger(__name__)
 SetLogLevel(-1)
 
 
-class ConversationalAgent(AgentHistoryMixin, AgentTTSMixin, AgentTurnMixin, AgentSilenceMixin):
+class ConversationalAgent(
+    AgentHistoryMixin, AgentTTSMixin, AgentTurnMixin, AgentSilenceMixin
+):
     """Per-session agent.  Receives pre-loaded shared resources to avoid
     re-loading the TTS model on every call."""
 

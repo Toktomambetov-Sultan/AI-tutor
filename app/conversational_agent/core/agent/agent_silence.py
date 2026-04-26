@@ -7,6 +7,7 @@ from core.protocol import MessageType, QueueMessage
 
 logger = logging.getLogger(__name__)
 
+
 class AgentSilenceMixin:
     """Manages silence timeouts and proactive engagement."""
 
